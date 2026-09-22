@@ -1,0 +1,36 @@
+# Run configuration for the TabICL benchmark.
+#   benchopt run . --config config_run.yml
+# CLI flag names become top-level keys; `dataset`/`solver` take the same
+# selectors as the CLI. List a component more than once to run a union of
+# grids instead of one full cartesian product.
+#
+# WARNING: the full default grid is large (see the counts below). For a first
+# pass, restrict with `-d`/`-s` filters, or comment out lines here.
+
+n-repetitions: 3
+# max-runs and timeout only apply to iterative (convergence-curve) solvers;
+# this benchmark uses sampling_strategy="run_once", so they are ignored.
+
+dataset:
+  # Default size ladder (n_samples, n_features). Classification also varies
+  # n_classes in {10, 100} (see datasets/simulated.py).
+  - "Simulated[n_samples=1000,n_features=20]"
+  - "Simulated[n_samples=5000,n_features=50]"
+  - "Simulated[n_samples=10000,n_features=100]"
+  - "Simulated[n_samples=50000,n_features=100]"
+  # Restrict to one task with e.g.:
+  # - "Simulated[task=classification]"
+  # or one class count:
+  # - "Simulated[task=classification,n_classes=10]"
+
+solver:
+  # Full solver grid: n_estimators x kv_cache x offload_mode = 4 x 2 x 4 = 32
+  # configs per dataset. Override subsets from the CLI for faster iteration.
+  - TabICL-Classifier
+  - TabICL-Regressor
+  # Example subsets:
+  #   - "TabICL-Classifier[n_estimators=[1,8],kv_cache=False,offload_mode=auto]"
+  #   - "TabICL-Regressor[device=cpu]"   # force CPU on a GPU machine
+
+# Fix the random seed for reproducible splits:
+# seed: 42

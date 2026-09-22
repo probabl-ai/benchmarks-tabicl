@@ -1,2 +1,122 @@
 # benchmarks-tabicl
-Benchopt project for running various benchmarks for tabicl and compiling results.
+
+Benchopt benchmark measuring **execution walltime and memory footprint** of
+[TabICL](https://tabicl.readthedocs.io) classifiers and regressors across
+**dataset sizes and hardware**.
+
+It records, per `(dataset, solver, parameters, repetition)` cell:
+
+| What | Where it comes from |
+| --- | --- |
+| Solver walltime (`time`) | benchopt, built-in |
+| `fit_time`, `predict_time` | this benchmark (split inside `Solver.run`) |
+| Peak **RAM** (`ram_peak_mb`) | this benchmark (psutil sampling) |
+| Peak **VRAM** (`vram_peak_mb`) | this benchmark (`torch.cuda.max_memory_allocated`) |
+| Accuracy / log-loss, RMSE / R2 | this benchmark (numpy) |
+| CPU model, core count, system RAM, CUDA version, package versions | benchopt provenance (automatic) |
+| GPU name + selected device | this benchmark (`objective_gpu_name`, `objective_device`) |
+
+> TabICL does not *train*: `fit` stores/prepares data, learning happens in
+> `predict` via in-context learning. Both are timed inside `run`; `fit_time`
+> and `predict_time` are reported separately on top of benchopt's `time`.
+
+## Structure
+
+```
+objective.py              # what is scored: timings, RAM/VRAM, accuracy/RMSE
+datasets/simulated.py      # synthetic classification/regression grids
+solvers/tabicl_classifier.py
+solvers/tabicl_regressor.py
+benchmark_utils/           # RAM/VRAM tracker, metrics, GPU info (shipped)
+config_run.yml             # example run configuration
+test_config.py
+```
+
+## Install
+
+```bash
+# Into the current env (needs torch; on a GPU machine use a CUDA torch build):
+benchopt install .
+
+# Or into an isolated conda env pinned to python 3.12 (recommended on shared
+# GPU boxes):
+benchopt install . -e
+benchopt run . -e
+```
+
+Download the TabICL checkpoint once (it is cached afterwards):
+
+```bash
+benchopt prepare .          # runs Dataset.prepare (no-op for Simulated)
+```
+
+## Run
+
+```bash
+# Smoke test on the tiny test config:
+benchopt run . -d Simulated -s TabICL-Classifier -n 1
+
+# Full grid (both tasks, the default size ladder, 3 repetitions):
+benchopt run . --config config_run.yml
+
+# Restrict to one size and force CPU to compare hardware on the same machine:
+benchopt run . \
+    -d "Simulated[n_samples=5000,n_features=50,task=classification]" \
+    -s "TabICL-Classifier[device=cpu]"
+```
+
+### Comparing hardware
+
+Each run is self-contained: the result parquet carries its own provenance
+(CPU model, cores, RAM, CUDA version, GPU name). To aggregate runs from
+several machines:
+
+```bash
+# Collect all parquets in outputs/, then:
+benchopt merge --keep all      # keep every machine's rows (compare hardware)
+benchopt plot                  # regenerate the dashboard
+```
+
+Use `--keep all` (not the default `last`) so identical configs run on
+different machines are not collapsed.
+
+## Results
+
+Results land in `outputs/` as `benchopt_run_<timestamp>.parquet` plus an HTML
+dashboard. Inspect in Python:
+
+```python
+from benchopt.results import read_results
+
+df = read_results("outputs/benchopt_run_*.parquet")
+# Final point per (dataset, solver, repetition):
+final = (df.sort_values("stop_val")
+           .groupby(["dataset_name", "solver_name", "idx_rep"], as_index=False)
+           .last())
+```
+
+## Tested solvers and datasets
+
+- **Solvers**: `TabICL-Classifier`, `TabICL-Regressor` (TabICL-only for now;
+  reference baselines such as gradient-boosted trees can be added later).
+
+  Parameter grid (each combination is a distinct result row):
+
+  | Parameter | Values | Notes |
+  | --- | --- | --- |
+  | `n_estimators` | `1, 2, 4, 8` | ensemble size |
+  | `batch_size` | `8` | default; extend to sweep |
+  | `kv_cache` | `False, True` | cache built during `fit`; warmup fills it, timed run rebuilds clean |
+  | `offload_mode` | `auto, gpu, cpu, disk` | `disk` uses `disk_offload_dir` |
+  | `disk_offload_dir` | `None` | **required** when `offload_mode='disk'` (a `ValueError` is raised otherwise); the path is created if missing and recorded as `objective_disk_offload_dir`. Point it at an NVMe drive for realistic numbers. |
+  | `n_jobs` | `-1` | use all CPU cores |
+  | `device` | `cpu, cuda, mps, xpu` | explicit; runs for unavailable devices are skipped |
+
+  Full grid = 4 × 2 × 4 = 32 configs per dataset; restrict with `-s` for
+  faster iteration. Point disk-offload at a fast local drive with
+  `disk_offload_dir=/path/to/dir` when benchmarking `offload_mode=disk`.
+
+- **Datasets**: `Simulated` with a default grid
+  `(1000, 20)`, `(5000, 50)`, `(10000, 100)`, `(50000, 100)` ×
+  `{classification (n_classes ∈ {10, 100}), regression}`.
+  Override per run via `-d` or `config_run.yml`.
