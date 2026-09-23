@@ -152,16 +152,22 @@ class BaseTabICLSolver(BaseSolver):
         self._tracker = None
 
     def _predict(self, X):
-        """Task-specific prediction on ``X``.
+        """Run the timed prediction on ``X``.
 
-        Returns ``(y_pred, y_score)`` where ``y_score`` is ``None`` when the
-        estimator has no ``predict_proba``.
+        Returns ``(y_pred, y_score, y_encoder)``:
+        * classifier: ``y_pred`` is ``None`` (derived later, untimed, in the
+          objective from ``y_score`` + ``y_encoder``), ``y_score`` is the output
+          of a single ``predict_proba`` call, and ``y_encoder`` is the fitted
+          label encoder. Only one forward pass is run — ``predict`` would just
+          redo ``predict_proba`` + argmax + inverse_transform.
+        * regressor: ``y_pred`` is the output of ``predict``, ``y_score`` and
+          ``y_encoder`` are ``None``.
         """
-        y_pred = self.estimator.predict(X)
-        y_score = None
         if self.needs_proba:
             y_score = self.estimator.predict_proba(X)
-        return y_pred, y_score
+            return None, y_score, self.estimator.y_encoder_
+        y_pred = self.estimator.predict(X)
+        return y_pred, None, None
 
     # --- warmup scenarios (1 & 4) -----------------------------------------
 
@@ -221,7 +227,7 @@ class BaseTabICLSolver(BaseSolver):
             # Estimator and tracker are already live from warm_up; just do the
             # real (timed) predict.
             t0 = time.perf_counter()
-            self.y_pred, self.y_score = self._predict(self.X_test)
+            self.y_pred, self.y_score, self.y_encoder = self._predict(self.X_test)
             self.predict_time = time.perf_counter() - t0
             self.resources = self._tracker.stop()
         else:
@@ -237,7 +243,7 @@ class BaseTabICLSolver(BaseSolver):
             t0 = time.perf_counter()
             self.estimator.fit(self.X_train, self.y_train)
             t1 = time.perf_counter()
-            self.y_pred, self.y_score = self._predict(self.X_test)
+            self.y_pred, self.y_score, self.y_encoder = self._predict(self.X_test)
             t2 = time.perf_counter()
 
             self.resources = self._tracker.stop()
@@ -248,6 +254,7 @@ class BaseTabICLSolver(BaseSolver):
         return dict(
             y_pred=self.y_pred,
             y_score=self.y_score,
+            y_encoder=self.y_encoder,
             fit_time=self.fit_time,
             predict_time=self.predict_time,
             ram_peak_mb=self.resources["ram_peak_mb"],

@@ -86,6 +86,7 @@ class Objective(BaseObjective):
         self,
         y_pred,
         y_score=None,
+        y_encoder=None,
         fit_time=0.0,
         predict_time=0.0,
         ram_peak_mb=0.0,
@@ -94,12 +95,20 @@ class Objective(BaseObjective):
     ):
         """Score a solver's predictions and attach resource metrics.
 
+        For classification the solver returns probabilities (``y_score``) and
+        the fitted label encoder (``y_encoder``); the argmax + inverse
+        transform to recover ``y_pred`` is done here, untimed, so it does not
+        pollute the solver's prediction timing.
+
         ``value`` is the quantity benchopt monitors/plots by default; it is
         defined as "lower is better" (``1 - accuracy`` for classification,
         ``rmse`` for regression).
         """
         gpu_name, device = get_gpu_info()
         if self.task == "classification":
+            # Derive class labels from probabilities (untimed scoring step).
+            if y_pred is None and y_score is not None and y_encoder is not None:
+                y_pred = y_encoder.inverse_transform(np.argmax(y_score, axis=1))
             acc = accuracy_score(self.y_test, y_pred)
             if y_score is not None:
                 ll = log_loss(
@@ -140,7 +149,9 @@ class Objective(BaseObjective):
         if self.task == "classification":
             y_pred = np.zeros(n_test, dtype=self.y_test.dtype)
             y_score = np.ones((n_test, self.n_classes_actual)) / self.n_classes_actual
-            return dict(y_pred=y_pred, y_score=y_score, disk_offload_dir=None)
+            return dict(
+                y_pred=y_pred, y_score=y_score, y_encoder=None, disk_offload_dir=None
+            )
         return dict(y_pred=np.zeros(n_test), disk_offload_dir=None)
 
     def get_objective(self):
