@@ -9,7 +9,6 @@ not by accident.
 
 import inspect
 
-
 # Devices the benchmark sweeps over. ``device`` must always be explicit
 # (never ``None``) so the selected accelerator is unambiguous in the results.
 DEVICE_GRID = ["cpu", "cuda", "mps", "xpu"]

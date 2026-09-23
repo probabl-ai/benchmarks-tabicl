@@ -4,21 +4,48 @@ Both solvers share the entire inference+measurement pipeline; only the
 estimator class, the task they accept, and whether they produce
 probabilities differ. Those specifics are declared via class attributes on
 the concrete subclass, and everything else lives here.
+
+Measurement windows
+-------------------
+Two axes cross to form four scenarios:
+
+* ``warmup`` (True/False): whether ``fit`` + a dummy 2-row ``predict`` run
+  ahead of time (in ``warm_up``, untimed by benchopt but covered by the
+  ResourceTracker) or inline in ``run`` (timed by benchopt).
+* ``kv_cache`` (True/False): whether ``fit`` builds the KV cache.
+
+| warmup | kv_cache | benchopt ``time``        | peak RAM/VRAM window              |
+|--------|----------|--------------------------|-----------------------------------|
+| True   | True     | predict only             | fit(cache) + dummy predict + pred |
+| True   | False    | predict only             | fit + dummy predict + predict     |
+| False  | True     | fit + predict            | fit(cache) + predict              |
+| False  | False    | fit + predict            | fit + predict                     |
+
+``fit_time`` and ``predict_time`` are always reported separately as objective
+metrics, so the breakdown is recoverable regardless of the scenario.
 """
 
+import tempfile
 import time
 from pathlib import Path
 
+import numpy as np
 import tabicl
 from benchopt import BaseSolver
 
 from benchmark_utils.defaults import (
-    DEVICE_GRID, check_default_batch_size, is_device_available,
+    DEVICE_GRID,
+    check_default_batch_size,
+    is_device_available,
 )
 from benchmark_utils.memory_tracking import ResourceTracker, cleanup_before_run
 
 # Verified once at import; the same default applies to both estimators.
 _DEFAULT_BATCH_SIZE = check_default_batch_size(tabicl.TabICLClassifier)
+
+# Number of rows used for the dummy warm-up predict (just enough to trigger
+# CUDA kernel autotuning / cuDNN JIT / FA3 JIT for the forward pass).
+_WARMUP_N_ROWS = 2
 
 
 class BaseTabICLSolver(BaseSolver):
@@ -37,8 +64,8 @@ class BaseTabICLSolver(BaseSolver):
         If True, ``run`` also calls ``predict_proba`` and returns ``y_score``
         (classifier only).
     test_config : dict
-        Per-subclass fast config for ``benchopt test`` (must pin ``task`` and
-        a compatible ``device``).
+        Per-subclass fast config for ``benchopt test`` (must pin ``task``,
+        ``device``, and ``warmup``).
     """
 
     # --- subclass-overridden hooks ----------------------------------------
@@ -48,12 +75,13 @@ class BaseTabICLSolver(BaseSolver):
         "n_estimators": [1, 2, 4, 8],
         "batch_size": [_DEFAULT_BATCH_SIZE],  # default; extend to sweep later
         "kv_cache": [False, True],
+        "warmup": [True, False],
         "offload_mode": ["auto", "gpu", "cpu", "disk"],
         # Path for memory-mapped offload files when offload_mode='disk'.
         # Required when offload_mode='disk' (a ValueError is raised if None).
         "disk_offload_dir": [None],
-        "n_jobs": [-1],             # use all cores on CPU
-        "device": DEVICE_GRID,       # explicit; unavailable devices are skipped
+        "n_jobs": [-1],  # use all cores on CPU
+        "device": DEVICE_GRID,  # explicit; unavailable devices are skipped
     }
 
     # --- shared implementation --------------------------------------------
@@ -74,9 +102,11 @@ class BaseTabICLSolver(BaseSolver):
     def _resolve_disk_offload_dir(self):
         """Resolve the disk-offload directory for ``offload_mode='disk'``.
 
-        The user must provide ``disk_offload_dir`` when using
-        ``offload_mode='disk'``; raises ``ValueError`` if it is missing. The
-        directory is created if needed and the resolved path is stored on
+        The user must provide ``disk_offload_dir`` (the parent location) when
+        using ``offload_mode='disk'``; raises ``ValueError`` if it is missing.
+        A fresh, unique subdirectory is created inside it on every call so
+        that a run never reuses offload files left behind by a previous run
+        (or by the warm-up estimator). The resolved path is stored on
         ``self._disk_offload_dir_used`` so it can be reported in the results.
         """
         d = self.disk_offload_dir
@@ -84,22 +114,17 @@ class BaseTabICLSolver(BaseSolver):
             raise ValueError(
                 "disk_offload_dir must be set when offload_mode='disk'. "
                 "Pass it via the CLI, e.g. "
-                f"-s \"{self.name}[offload_mode=disk,"
-                "disk_offload_dir=/scratch/tabicl]\"."
+                f'-s "{self.name}[offload_mode=disk,'
+                'disk_offload_dir=/scratch/tabicl]".'
             )
-        p = Path(d)
-        p.mkdir(parents=True, exist_ok=True)
-        return str(p)
+        parent = Path(d)
+        parent.mkdir(parents=True, exist_ok=True)
+        # Unique per-call subdir to isolate this run's offload files.
+        run_dir = Path(tempfile.mkdtemp(prefix="run_", dir=parent))
+        return str(run_dir)
 
     def _build_estimator(self):
-        """Construct a fresh estimator with the current parameters.
-
-        Recreated at the start of ``run`` (not just ``set_objective``) so the
-        timed measurement starts from a clean state — important for
-        ``kv_cache=True``, where ``fit`` builds the cache: without this, the
-        cache warmed up in ``warm_up`` would carry over and the timed ``fit``
-        would measure a refill rather than a clean build.
-        """
+        """Construct a fresh estimator with the current parameters."""
         disk_offload_dir = None
         if self.offload_mode == "disk":
             disk_offload_dir = self._resolve_disk_offload_dir()
@@ -118,54 +143,106 @@ class BaseTabICLSolver(BaseSolver):
         self.X_train = X_train
         self.y_train = y_train
         self.X_test = X_test
-        # Default; overwritten in `run` / `warm_up` when offload_mode='disk'.
+        # Default; overwritten when an estimator is built.
         self._disk_offload_dir_used = None
-        # Build once for warm_up; ``run`` rebuilds a fresh estimator so the
-        # timed measurement starts clean (see ``_build_estimator``).
-        self.estimator = self._build_estimator()
+        # Estimator is built in warm_up (warmup=True) or in run (warmup=False).
+        self.estimator = None
+        # Resource tracker lives across warm_up + run when warmup=True, so the
+        # peak memory window covers the fit (including kv_cache build).
+        self._tracker = None
 
-    def warm_up(self):
-        # Absorb one-time costs (checkpoint download, CUDA kernel autotuning,
-        # cuDNN JIT, FA3 JIT) out of the measured run. The downloaded
-        # checkpoint is cached on disk for subsequent runs. For
-        # ``kv_cache=True`` this also fills the cache once — but the timed
-        # ``run`` rebuilds a fresh estimator, so it measures a clean cache
-        # build, not a refill.
-        self.run_once()
-
-    def _predict(self):
-        """Task-specific prediction; override in the subclass if needed.
+    def _predict(self, X):
+        """Task-specific prediction on ``X``.
 
         Returns ``(y_pred, y_score)`` where ``y_score`` is ``None`` when the
         estimator has no ``predict_proba``.
         """
-        y_pred = self.estimator.predict(self.X_test)
+        y_pred = self.estimator.predict(X)
         y_score = None
         if self.needs_proba:
-            y_score = self.estimator.predict_proba(self.X_test)
+            y_score = self.estimator.predict_proba(X)
         return y_pred, y_score
 
-    def run(self, stop_val):
-        # Release the warm-up estimator and reclaim its memory so the
-        # ResourceTracker baseline is clean (otherwise the warm-up model's
-        # RSS / VRAM inflates the baseline and corrupts the incremental peak).
-        self.estimator = None
-        cleanup_before_run()
-        # Fresh estimator: the timed fit/predict start from a clean state.
+    # --- warmup scenarios (1 & 4) -----------------------------------------
+
+    def _warmup_input(self):
+        """Return a tiny dummy test set with subtle noise for the warm-up predict.
+
+        Takes the first ``_WARMUP_N_ROWS`` rows of the real test set and adds
+        small per-column Gaussian noise (1e-3 of each column's std, floored
+        to avoid zero scale on constant columns). This ensures the warm-up
+        rows differ from the real test rows so the timed predict cannot
+        benefit from any data-level memoization, while the warm-up still
+        triggers forward-pass kernel / cuDNN / FA3 autotuning.
+        """
+        X = np.array(self.X_test[:_WARMUP_N_ROWS], dtype=float, copy=True)
+        # Fixed seed: the noise only needs to differ from the real data, not
+        # be random across runs.
+        rng = np.random.default_rng(0)
+        col_std = X.std(axis=0, keepdims=True)
+        # 1e-3 relative scale + 1e-6 floor for constant/zero-variance columns.
+        noise_scale = 1e-3 * col_std + 1e-6
+        X += rng.standard_normal(X.shape) * noise_scale
+        return X
+
+    def warm_up(self):
+        """Pre-fit + dummy predict ahead of the timed run (warmup=True only).
+
+        Starts the ResourceTracker here so peak RAM/VRAM covers the fit
+        (including the kv_cache build) and the dummy forward pass that warms
+        up CUDA kernels / cuDNN JIT / FA3 JIT. The tracker keeps running into
+        ``run``, which only does the real predict.
+        """
+        if not self.warmup:
+            return  # scenario 2 or 3: everything happens in run()
+
+        # Clean baseline before any allocation: release leftover state from
+        # prior runs (gc + empty_cache on the matching accelerator backend).
+        cleanup_before_run(self.device)
+
         self.estimator = self._build_estimator()
 
-        tracker = ResourceTracker()
-        tracker.start()
+        self._tracker = ResourceTracker()
+        self._tracker.start()
 
         t0 = time.perf_counter()
         self.estimator.fit(self.X_train, self.y_train)
-        t1 = time.perf_counter()
-        self.y_pred, self.y_score = self._predict()
-        t2 = time.perf_counter()
+        self.fit_time = time.perf_counter() - t0
 
-        self.resources = tracker.stop()
-        self.fit_time = t1 - t0
-        self.predict_time = t2 - t1
+        # Dummy predict on a tiny noisy slice to trigger forward-pass kernel
+        # autotuning without the full predict cost (and without reusing the
+        # exact rows the timed predict will see — see ``_warmup_input``).
+        self._predict(self._warmup_input())
+
+    # --- timed run --------------------------------------------------------
+
+    def run(self, stop_val):
+        if self.warmup:
+            # Estimator and tracker are already live from warm_up; just do the
+            # real (timed) predict.
+            t0 = time.perf_counter()
+            self.y_pred, self.y_score = self._predict(self.X_test)
+            self.predict_time = time.perf_counter() - t0
+            self.resources = self._tracker.stop()
+        else:
+            # Scenario 2 or 3: fit + predict, all timed by benchopt.
+            # Clean baseline before any allocation (see warm_up for details).
+            cleanup_before_run(self.device)
+
+            self.estimator = self._build_estimator()
+
+            self._tracker = ResourceTracker()
+            self._tracker.start()
+
+            t0 = time.perf_counter()
+            self.estimator.fit(self.X_train, self.y_train)
+            t1 = time.perf_counter()
+            self.y_pred, self.y_score = self._predict(self.X_test)
+            t2 = time.perf_counter()
+
+            self.resources = self._tracker.stop()
+            self.fit_time = t1 - t0
+            self.predict_time = t2 - t1
 
     def get_result(self):
         return dict(

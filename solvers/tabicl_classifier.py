@@ -11,7 +11,6 @@ from benchmark_utils.base_solver import BaseTabICLSolver
 
 
 class Solver(BaseTabICLSolver):
-
     name = "TabICL-Classifier"
     estimator_cls = tabicl.TabICLClassifier
     task = "classification"
@@ -28,6 +27,7 @@ class Solver(BaseTabICLSolver):
         # Shrink the solver grid for `benchopt test` speed.
         "n_estimators": 1,
         "kv_cache": False,
+        "warmup": False,
         "offload_mode": "auto",
         "device": "cpu",
     }

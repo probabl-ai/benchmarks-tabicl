@@ -1,0 +1,43 @@
+# See https://docs.astral.sh/ruff/linter/#rule-selection
+exclude = [
+    ".agents",
+    ".claude",
+    "venv",
+    "outputs",
+]
+
+[lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    "I",
+    # pydocstyle
+    "D"
+]
+
+[lint.pydocstyle]
+convention = "numpy"
+
+# Benchopt component classes (Solver / Dataset / Objective) implement a fixed
+# framework contract — ``skip``, ``set_objective``, ``run``, ``get_result``,
+# ``get_data`` … — whose semantics are defined by benchopt, not by this
+# benchmark. Forcing a docstring on each override just paraphrases the
+# contract, so the missing-docstring rules (D100-D107) are silenced on the
+# benchmark's component files. ``benchmark_utils/base_solver.py`` carries the
+# shared overrides; ``test_config.py`` is pure boilerplate too.
+[lint.per-file-ignores]
+"objective.py" = ["D100", "D101", "D102", "D103", "D104", "D105", "D401"]
+"datasets/*.py" = ["D100", "D101", "D102", "D103"]
+"solvers/*.py" = ["D100", "D101", "D102", "D103"]
+"benchmark_utils/base_solver.py" = ["D100", "D101", "D102", "D103"]
+"benchmark_utils/__init__.py" = ["D104"]
+"test_config.py" = ["D100", "D101", "D102", "D103", "D401"]

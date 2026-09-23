@@ -15,16 +15,14 @@ RAM, CUDA version, package versions) in every result parquet. The
 accelerator actually selected by TabICL, which benchopt does not record.
 """
 
-from benchopt import BaseObjective
-
 import numpy as np
+from benchopt import BaseObjective
 from sklearn.metrics import accuracy_score, log_loss, mean_squared_error, r2_score
 
 from benchmark_utils.memory_tracking import get_gpu_info
 
 
 class Objective(BaseObjective):
-
     # Name to select the objective in the CLI and to display the results.
     name = "TabICL inference"
 
@@ -84,9 +82,16 @@ class Objective(BaseObjective):
         # the flow benchopt's test suite expects.
         return False, None
 
-    def evaluate_result(self, y_pred, y_score=None, fit_time=0.0,
-                        predict_time=0.0, ram_peak_mb=0.0, vram_peak_mb=0.0,
-                        disk_offload_dir=None):
+    def evaluate_result(
+        self,
+        y_pred,
+        y_score=None,
+        fit_time=0.0,
+        predict_time=0.0,
+        ram_peak_mb=0.0,
+        vram_peak_mb=0.0,
+        disk_offload_dir=None,
+    ):
         """Score a solver's predictions and attach resource metrics.
 
         ``value`` is the quantity benchopt monitors/plots by default; it is
@@ -96,8 +101,12 @@ class Objective(BaseObjective):
         gpu_name, device = get_gpu_info()
         if self.task == "classification":
             acc = accuracy_score(self.y_test, y_pred)
-            ll = (log_loss(self.y_test, y_score, labels=list(range(self.n_classes_actual)))
-                  if y_score is not None else float("nan"))
+            if y_score is not None:
+                ll = log_loss(
+                    self.y_test, y_score, labels=list(range(self.n_classes_actual))
+                )
+            else:
+                ll = float("nan")
             return dict(
                 value=1.0 - acc,
                 accuracy=acc,
@@ -126,7 +135,7 @@ class Objective(BaseObjective):
             )
 
     def get_one_result(self):
-        """Dummy result for `benchopt test` (no real solver needed)."""
+        """Return a dummy result for `benchopt test` (no real solver needed)."""
         n_test = self.y_test.shape[0]
         if self.task == "classification":
             y_pred = np.zeros(n_test, dtype=self.y_test.dtype)

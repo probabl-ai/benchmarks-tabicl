@@ -90,9 +90,11 @@ from benchopt.results import read_results
 
 df = read_results("outputs/benchopt_run_*.parquet")
 # Final point per (dataset, solver, repetition):
-final = (df.sort_values("stop_val")
-           .groupby(["dataset_name", "solver_name", "idx_rep"], as_index=False)
-           .last())
+final = (
+    df.sort_values("stop_val")
+    .groupby(["dataset_name", "solver_name", "idx_rep"], as_index=False)
+    .last()
+)
 ```
 
 ## Tested solvers and datasets
@@ -106,13 +108,29 @@ final = (df.sort_values("stop_val")
   | --- | --- | --- |
   | `n_estimators` | `1, 2, 4, 8` | ensemble size |
   | `batch_size` | `8` | default; extend to sweep |
-  | `kv_cache` | `False, True` | cache built during `fit`; warmup fills it, timed run rebuilds clean |
+  | `kv_cache` | `False, True` | cache built during `fit` |
+  | `warmup` | `True, False` | pre-fit + dummy predict ahead of the timed run |
   | `offload_mode` | `auto, gpu, cpu, disk` | `disk` uses `disk_offload_dir` |
   | `disk_offload_dir` | `None` | **required** when `offload_mode='disk'` (a `ValueError` is raised otherwise); the path is created if missing and recorded as `objective_disk_offload_dir`. Point it at an NVMe drive for realistic numbers. |
   | `n_jobs` | `-1` | use all CPU cores |
   | `device` | `cpu, cuda, mps, xpu` | explicit; runs for unavailable devices are skipped |
 
-  Full grid = 4 × 2 × 4 = 32 configs per dataset; restrict with `-s` for
+  ``warmup`` and ``kv_cache`` cross to form four measurement scenarios:
+
+  | warmup | kv_cache | benchopt `time` | peak RAM/VRAM window |
+  |--------|----------|----------------|----------------------|
+  | True   | True     | predict only   | fit(cache) + dummy predict + predict |
+  | True   | False    | predict only   | fit + dummy predict + predict |
+  | False  | True     | fit + predict  | fit(cache) + predict |
+  | False  | False    | fit + predict  | fit + predict |
+
+  ``fit_time`` and ``predict_time`` are always reported separately, so the
+  breakdown is recoverable regardless of scenario. Note that benchopt's
+  ``time`` column covers predict only when ``warmup=True`` and fit+predict
+  when ``warmup=False`` — compare across scenarios via ``fit_time`` /
+  ``predict_time``, not ``time`` alone.
+
+  Full grid = 4 × 2 × 2 × 4 = 64 configs per dataset; restrict with `-s` for
   faster iteration. Point disk-offload at a fast local drive with
   `disk_offload_dir=/path/to/dir` when benchmarking `offload_mode=disk`.
 
