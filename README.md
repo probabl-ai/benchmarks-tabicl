@@ -118,10 +118,16 @@ final = (
   | `batch_size` | `8` | default; extend to sweep |
   | `kv_cache` | `False, True` | cache built during `fit` |
   | `warmup` | `True, False` | pre-fit + dummy predict ahead of the timed run |
-  | `offload_mode` | `auto, gpu, cpu, disk` | `disk` uses `disk_offload_dir` |
-  | `disk_offload_dir` | `None` | **required** when `offload_mode='disk'` (a `ValueError` is raised otherwise); the path is created if missing and recorded as `objective_disk_offload_dir`. Point it at an NVMe drive for realistic numbers. |
+  | `offload_mode` | `auto, gpu, cpu, disk` | `disk` uses the objective's `scratch_dir` |
   | `n_jobs` | `-1` | use all CPU cores |
   | `device` | `cpu, cuda, mps, xpu` | explicit; runs for unavailable devices are skipped |
+
+  **Objective parameters** (set once for all solvers via `-o`):
+
+  | Parameter | Values | Notes |
+  | --- | --- | --- |
+  | `objective_label` | required | short free-text label describing why this run is performed |
+  | `scratch_dir` | `None` | shared scratch location; solvers that use `offload_mode='disk'` create a `disk-offload/` subdir inside it (with a per-run temp dir). Required when any solver uses `offload_mode='disk'` (skipped otherwise). |
 
   ``warmup`` and ``kv_cache`` cross to form four measurement scenarios:
 
@@ -139,8 +145,8 @@ final = (
   ``predict_time``, not ``time`` alone.
 
   Full grid = 4 × 2 × 2 × 4 = 64 configs per dataset; restrict with `-s` for
-  faster iteration. Point disk-offload at a fast local drive with
-  `disk_offload_dir=/path/to/dir` when benchmarking `offload_mode=disk`.
+  faster iteration. For disk offload, pass `scratch_dir=/path/to/dir` via the
+  objective (e.g. `-o "TabICL inference[scratch_dir=/scratch]"`).
 
 - **Datasets**: `Simulated` with a default grid
   `(1000, 20)`, `(5000, 50)`, `(10000, 100)`, `(50000, 100)` ×

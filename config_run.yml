@@ -15,6 +15,11 @@ n-repetitions: 3
 # Pass it via the CLI, e.g.
 #   -o "TabICL inference[objective_label='baseline CPU run']"
 # Recorded as `p_objective_objective_label` in the output parquet.
+#
+# Optional: scratch_dir is a shared scratch location for solvers that need
+# disk space (e.g. offload_mode='disk'). Set it via the CLI, e.g.
+#   -o "TabICL inference[objective_label='...',scratch_dir=/scratch/tabicl]"
+# Solvers create a `disk-offload/` subdir inside it with per-run temp dirs.
 
 dataset:
   # Default size ladder (n_samples, n_features). Classification also varies

@@ -39,8 +39,13 @@ class Objective(BaseObjective):
     # set from the CLI/config (it raises if left None) so every result parquet
     # carries a human-readable purpose. Recorded automatically by benchopt as
     # the ``p_objective_objective_label`` column.
+    #
+    # ``scratch_dir`` is a shared scratch location passed to all solvers;
+    # solvers that need on-disk storage (e.g. disk offloading) create a
+    # sub-directory inside it. Recorded as ``p_objective_scratch_dir``.
     parameters = {
         "objective_label": [None],
+        "scratch_dir": [None],
     }
 
     # Tiny config exercising the objective->dataset->solver chain fast.
@@ -53,6 +58,7 @@ class Objective(BaseObjective):
             "task": "classification",
         },
         "objective_label": "test",
+        "scratch_dir": None,
     }
 
     def set_data(self, X, y, task, n_classes):
@@ -184,7 +190,8 @@ class Objective(BaseObjective):
         """Payload handed to every solver via ``set_objective``.
 
         ``y_test`` is kept on the objective for scoring and never exposed
-        to solvers.
+        to solvers. ``scratch_dir`` is forwarded so solvers that need disk
+        space (e.g. disk offloading) can use it.
         """
         return dict(
             X_train=self.X_train,
@@ -192,4 +199,5 @@ class Objective(BaseObjective):
             X_test=self.X_test,
             task=self.task,
             n_classes=self.n_classes,
+            scratch_dir=self.scratch_dir,
         )

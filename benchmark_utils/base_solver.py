@@ -81,16 +81,15 @@ class BaseTabICLSolver(BaseSolver):
         "kv_cache": [False, True],
         "warmup": [True, False],
         "offload_mode": ["auto", "gpu", "cpu", "disk"],
-        # Path for memory-mapped offload files when offload_mode='disk'.
-        # Required when offload_mode='disk' (a ValueError is raised if None).
-        "disk_offload_dir": [None],
+        # No disk_offload_dir here — it comes from the objective's scratch_dir
+        # parameter (see get_objective), so it's set once for all solvers.
         "n_jobs": [-1],  # use all cores on CPU
         "device": DEVICE_GRID,  # explicit; unavailable devices are skipped
     }
 
     # --- shared implementation --------------------------------------------
 
-    def skip(self, X_train, y_train, X_test, task, n_classes):
+    def skip(self, X_train, y_train, X_test, task, n_classes, scratch_dir):
         if task != self.task:
             return True, f"{self.name} only handles {self.task}."
         # ``n_classes`` is only meaningful for classification; the cartesian
@@ -101,35 +100,27 @@ class BaseTabICLSolver(BaseSolver):
             return True, "n_classes is only used for classification."
         if not is_device_available(self.device):
             return True, f"device {self.device!r} is not available on this host."
-        # disk offload requires a user-provided directory; skip (not error)
-        # so the full grid runs cleanly without crashing on this config.
-        if self.offload_mode == "disk" and self.disk_offload_dir is None:
+        # disk offload needs a scratch dir; skip (not error) so the full grid
+        # runs cleanly without crashing on this config.
+        if self.offload_mode == "disk" and scratch_dir is None:
             return True, (
-                "disk_offload_dir must be set when offload_mode='disk'; "
-                f'pass -s "{self.name}[offload_mode=disk,'
-                'disk_offload_dir=/scratch/tabicl]".'
+                "scratch_dir must be set when offload_mode='disk'; pass it "
+                "via the objective, e.g. "
+                '-o "TabICL inference[scratch_dir=/scratch/tabicl]".'
             )
         return False, None
 
     def _resolve_disk_offload_dir(self):
         """Resolve the disk-offload directory for ``offload_mode='disk'``.
 
-        The user must provide ``disk_offload_dir`` (the parent location) when
-        using ``offload_mode='disk'``; raises ``ValueError`` if it is missing.
-        A fresh, unique subdirectory is created inside it on every call so
-        that a run never reuses offload files left behind by a previous run
-        (or by the warm-up estimator). The resolved path is stored on
-        ``self._disk_offload_dir_used`` so it can be reported in the results.
+        Uses the objective-provided ``scratch_dir`` as the parent, creating a
+        ``disk-offload`` subdirectory inside it (so multiple solvers sharing
+        the same scratch dir stay isolated). A fresh, unique subdirectory is
+        created on every call so a run never reuses offload files left behind
+        by a previous run (or by the warm-up estimator). The resolved path is
+        stored on ``self._disk_offload_dir_used`` for reporting in results.
         """
-        d = self.disk_offload_dir
-        if d is None:
-            raise ValueError(
-                "disk_offload_dir must be set when offload_mode='disk'. "
-                "Pass it via the CLI, e.g. "
-                f'-s "{self.name}[offload_mode=disk,'
-                'disk_offload_dir=/scratch/tabicl]".'
-            )
-        parent = Path(d)
+        parent = Path(self.scratch_dir) / "disk-offload"
         parent.mkdir(parents=True, exist_ok=True)
         # Unique per-call subdir to isolate this run's offload files.
         run_dir = Path(tempfile.mkdtemp(prefix="run_", dir=parent))
@@ -151,10 +142,12 @@ class BaseTabICLSolver(BaseSolver):
             device=self.device,
         )
 
-    def set_objective(self, X_train, y_train, X_test, task, n_classes):
+    def set_objective(self, X_train, y_train, X_test, task, n_classes, scratch_dir):
         self.X_train = X_train
         self.y_train = y_train
         self.X_test = X_test
+        # Shared scratch dir from the objective; used by _resolve_disk_offload_dir.
+        self.scratch_dir = scratch_dir
         # Default; overwritten when an estimator is built.
         self._disk_offload_dir_used = None
         # Estimator is built in warm_up (warmup=True) or in run (warmup=False).
