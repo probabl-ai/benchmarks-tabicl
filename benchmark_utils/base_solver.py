@@ -25,6 +25,7 @@ Two axes cross to form four scenarios:
 metrics, so the breakdown is recoverable regardless of the scenario.
 """
 
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -125,6 +126,19 @@ class BaseTabICLSolver(BaseSolver):
         # Unique per-call subdir to isolate this run's offload files.
         run_dir = Path(tempfile.mkdtemp(prefix="run_", dir=parent))
         return str(run_dir)
+
+    def _cleanup_disk_offload_dir(self):
+        """Delete the per-run disk-offload directory after the run is done.
+
+        The offload files are only needed during fit/predict; once ``run``
+        has stored the predictions they can be removed. The path string in
+        ``self._disk_offload_dir_used`` is preserved for ``get_result`` to
+        report in the results parquet. Errors are ignored (e.g. if the dir
+        was already removed or is on a stale NFS handle).
+        """
+        d = getattr(self, "_disk_offload_dir_used", None)
+        if d is not None:
+            shutil.rmtree(d, ignore_errors=True)
 
     def _build_estimator(self):
         """Construct a fresh estimator with the current parameters."""
@@ -254,6 +268,11 @@ class BaseTabICLSolver(BaseSolver):
             self.resources = self._tracker.stop()
             self.fit_time = t1 - t0
             self.predict_time = t2 - t1
+
+        # Offload files are no longer needed once predict is done; remove the
+        # per-run temp dir so the scratch dir doesn't fill up across runs.
+        # The path string is preserved in _disk_offload_dir_used for get_result.
+        self._cleanup_disk_offload_dir()
 
     def get_result(self):
         # Resolve GPU info for the device the solver actually used (not just
