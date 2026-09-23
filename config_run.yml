@@ -7,7 +7,7 @@
 # WARNING: the full default grid is large (see the counts below). For a first
 # pass, restrict with `-d`/`-s` filters, or comment out lines here.
 
-n-repetitions: 3
+# n-repetitions: 3
 # max-runs and timeout only apply to iterative (convergence-curve) solvers;
 # this benchmark uses sampling_strategy="run_once", so they are ignored.
 
@@ -21,23 +21,24 @@ n-repetitions: 3
 #   -o "TabICL inference[objective_label='...',scratch_dir=/scratch/tabicl]"
 # Solvers create a `disk-offload/` subdir inside it with per-run temp dirs.
 
-dataset:
-  # Default size ladder (n_samples, n_features). Classification also varies
-  # n_classes in {10, 100} (see datasets/simulated.py).
-  - "Simulated[n_samples=1000,n_features=20]"
-  - "Simulated[n_samples=5000,n_features=50]"
-  - "Simulated[n_samples=10000,n_features=100]"
-  - "Simulated[n_samples=50000,n_features=100]"
+# dataset:
+  # Default size ladder (n_train_samples, n_features). Classification also
+  # varies n_classes in {10, 100} and n_test_samples in {1, 32, 512, 2048}
+  # (see datasets/simulated.py).
+  # - "Simulated[n_train_samples=1000,n_features=20]"
+  # - "Simulated[n_train_samples=5000,n_features=50]"
+  # - "Simulated[n_train_samples=10000,n_features=100]"
+  # - "Simulated[n_train_samples=50000,n_features=100]"
   # Restrict to one task with e.g.:
   # - "Simulated[task=classification]"
-  # or one class count:
-  # - "Simulated[task=classification,n_classes=10]"
+  # or one test-set size:
+  # - "Simulated[n_test_samples=32]"
 
-solver:
+# solver:
   # Full solver grid: n_estimators x kv_cache x offload_mode = 4 x 2 x 4 = 32
   # configs per dataset. Override subsets from the CLI for faster iteration.
-  - TabICL-Classifier
-  - TabICL-Regressor
+  # - TabICL-Classifier
+  # - TabICL-Regressor
   # Example subsets:
   #   - "TabICL-Classifier[n_estimators=[1,8],kv_cache=False,offload_mode=auto]"
   #   - "TabICL-Regressor[device=cpu]"   # force CPU on a GPU machine

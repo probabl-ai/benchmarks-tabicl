@@ -19,8 +19,9 @@ class Solver(BaseTabICLSolver):
     test_config = {
         "dataset": {
             "name": "simulated",
-            "n_samples": 200,
+            "n_train_samples": 200,
             "n_features": 5,
+            "n_test_samples": 50,
             "n_classes": 10,
             "task": "regression",
         },

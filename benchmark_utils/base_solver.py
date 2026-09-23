@@ -99,6 +99,9 @@ class BaseTabICLSolver(BaseSolver):
         # instance and skip the redundant duplicates.
         if task == "regression" and n_classes != 10:
             return True, "n_classes is only used for classification."
+        # kv_cache only supports up to 10 classes; skip when above the limit.
+        if self.kv_cache and task == "classification" and n_classes > 10:
+            return True, "kv_cache=True only supports n_classes <= 10."
         if not is_device_available(self.device):
             return True, f"device {self.device!r} is not available on this host."
         # disk offload needs a scratch dir; skip (not error) so the full grid
@@ -141,9 +144,16 @@ class BaseTabICLSolver(BaseSolver):
             shutil.rmtree(d, ignore_errors=True)
 
     def _build_estimator(self):
-        """Construct a fresh estimator with the current parameters."""
+        """Construct a fresh estimator with the current parameters.
+
+        ``disk_offload_dir`` is resolved from ``scratch_dir`` whenever a
+        scratch dir is available, regardless of ``offload_mode``. This lets
+        ``offload_mode='auto'`` fall back to disk offloading (per TabICL's
+        API) when VRAM is insufficient. When ``scratch_dir`` is None,
+        ``disk_offload_dir`` stays None and ``auto`` simply won't use disk.
+        """
         disk_offload_dir = None
-        if self.offload_mode == "disk":
+        if self.scratch_dir is not None:
             disk_offload_dir = self._resolve_disk_offload_dir()
         self._disk_offload_dir_used = disk_offload_dir
         return self.estimator_cls(
@@ -169,6 +179,12 @@ class BaseTabICLSolver(BaseSolver):
         # Resource tracker lives across warm_up + run when warmup=True, so the
         # peak memory window covers the fit (including kv_cache build).
         self._tracker = None
+        # Benchopt's _warm_up has a "run once" guard (_warmup_done) that persists
+        # across datasets when the solver instance is reused (sequential runs).
+        # Clear it so warm_up re-runs for each new dataset — otherwise the
+        # estimator from the previous dataset (or None if set_objective reset
+        # it) is used by run(), causing a stale/None estimator error.
+        self._warmup_done = None
 
     def _predict(self, X):
         """Run the timed prediction on ``X``.
@@ -218,12 +234,12 @@ class BaseTabICLSolver(BaseSolver):
         up CUDA kernels / cuDNN JIT / FA3 JIT. The tracker keeps running into
         ``run``, which only does the real predict.
         """
-        if not self.warmup:
-            return  # scenario 2 or 3: everything happens in run()
-
         # Clean baseline before any allocation: release leftover state from
         # prior runs (gc + empty_cache on the matching accelerator backend).
         cleanup_before_run(self.device)
+
+        if not self.warmup:
+            return  # scenario 2 or 3: everything happens in run()
 
         self.estimator = self._build_estimator()
 
@@ -250,10 +266,6 @@ class BaseTabICLSolver(BaseSolver):
             self.predict_time = time.perf_counter() - t0
             self.resources = self._tracker.stop()
         else:
-            # Scenario 2 or 3: fit + predict, all timed by benchopt.
-            # Clean baseline before any allocation (see warm_up for details).
-            cleanup_before_run(self.device)
-
             self.estimator = self._build_estimator()
 
             self._tracker = ResourceTracker()
