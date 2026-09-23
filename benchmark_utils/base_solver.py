@@ -38,7 +38,11 @@ from benchmark_utils.defaults import (
     check_default_batch_size,
     is_device_available,
 )
-from benchmark_utils.memory_tracking import ResourceTracker, cleanup_before_run
+from benchmark_utils.memory_tracking import (
+    ResourceTracker,
+    cleanup_before_run,
+    get_gpu_info,
+)
 
 # Verified once at import; the same default applies to both estimators.
 _DEFAULT_BATCH_SIZE = check_default_batch_size(tabicl.TabICLClassifier)
@@ -97,6 +101,14 @@ class BaseTabICLSolver(BaseSolver):
             return True, "n_classes is only used for classification."
         if not is_device_available(self.device):
             return True, f"device {self.device!r} is not available on this host."
+        # disk offload requires a user-provided directory; skip (not error)
+        # so the full grid runs cleanly without crashing on this config.
+        if self.offload_mode == "disk" and self.disk_offload_dir is None:
+            return True, (
+                "disk_offload_dir must be set when offload_mode='disk'; "
+                f'pass -s "{self.name}[offload_mode=disk,'
+                'disk_offload_dir=/scratch/tabicl]".'
+            )
         return False, None
 
     def _resolve_disk_offload_dir(self):
@@ -251,6 +263,10 @@ class BaseTabICLSolver(BaseSolver):
             self.predict_time = t2 - t1
 
     def get_result(self):
+        # Resolve GPU info for the device the solver actually used (not just
+        # what's available on the host), so a CPU run on a GPU machine records
+        # device='cpu', gpu_name=None.
+        gpu_name, device = get_gpu_info(self.device)
         return dict(
             y_pred=self.y_pred,
             y_score=self.y_score,
@@ -260,4 +276,6 @@ class BaseTabICLSolver(BaseSolver):
             ram_peak_mb=self.resources["ram_peak_mb"],
             vram_peak_mb=self.resources["vram_peak_mb"],
             disk_offload_dir=self._disk_offload_dir_used,
+            device=device,
+            gpu_name=gpu_name,
         )

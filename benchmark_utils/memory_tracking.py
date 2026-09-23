@@ -161,25 +161,48 @@ def cleanup_before_run(device="cpu"):
         pass
 
 
-def get_gpu_info():
-    """Return ``(gpu_name, device_str)`` for the active accelerator.
+def get_gpu_info(device="cpu"):
+    """Return ``(gpu_name, device_str)`` for the given device.
 
-    Returns ``(None, "cpu")`` when no accelerator is available or torch is
-    absent.
+    Reports the GPU name *for the requested device only*, so a CPU run on a
+    machine that also has a GPU correctly returns ``(None, "cpu")`` instead of
+    picking up the accelerator.
+
+    Parameters
+    ----------
+    device : str, default "cpu"
+        The device the solver actually used. One of ``"cpu"``, ``"cuda"``,
+        ``"mps"``, ``"xpu"``.
+
+    Returns
+    -------
+    gpu_name : str or None
+        The accelerator's model name, or ``None`` for ``"cpu"``.
+    device : str
+        Echoed back for recording in the results.
+
+    Raises
+    ------
+    RuntimeError
+        If the requested accelerator backend is not available or its name
+        cannot be retrieved (e.g. a non-CUDA device on a torch build without
+        that backend). The solver's ``skip`` should have caught this
+        beforehand, so reaching this error indicates a logic bug.
     """
-    if not _HAS_TORCH:
-        return (None, "cpu")
-    try:
-        if torch.cuda.is_available():
-            return (torch.cuda.get_device_name(0), "cuda")
+    if device == "cpu" or not _HAS_TORCH:
+        return (None, device if device else "cpu")
+    if device == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("cuda requested but not available.")
+        return (torch.cuda.get_device_name(0), "cuda")
+    if device == "mps":
+        mps = getattr(torch.backends, "mps", None)
+        if mps is None or not mps.is_available():
+            raise RuntimeError("mps requested but not available.")
+        return (mps.get_name(), "mps")
+    if device == "xpu":
         xpu = getattr(torch, "xpu", None)
-        if xpu is not None and xpu.is_available():
-            return (xpu.get_device_name(0), "xpu")
-        if (
-            getattr(torch.backends, "mps", None) is not None
-            and torch.backends.mps.is_available()
-        ):
-            return ("Apple Silicon GPU", "mps")
-    except Exception:  # pragma: no cover - defensive
-        pass
-    return (None, "cpu")
+        if xpu is None or not xpu.is_available():
+            raise RuntimeError("xpu requested but not available.")
+        return (xpu.get_device_name(0), "xpu")
+    raise RuntimeError(f"Unknown device {device!r}.")

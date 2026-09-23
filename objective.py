@@ -19,7 +19,7 @@ import numpy as np
 from benchopt import BaseObjective
 from sklearn.metrics import accuracy_score, log_loss, mean_squared_error, r2_score
 
-from benchmark_utils.memory_tracking import get_gpu_info
+from benchmark_utils.versions import PACKAGE_VERSIONS
 
 
 class Objective(BaseObjective):
@@ -35,6 +35,14 @@ class Objective(BaseObjective):
     # convergence curve. All solvers inherit this.
     sampling_strategy = "run_once"
 
+    # A short free-text label describing *why* this run is performed. Must be
+    # set from the CLI/config (it raises if left None) so every result parquet
+    # carries a human-readable purpose. Recorded automatically by benchopt as
+    # the ``p_objective_objective_label`` column.
+    parameters = {
+        "objective_label": [None],
+    }
+
     # Tiny config exercising the objective->dataset->solver chain fast.
     test_config = {
         "dataset": {
@@ -43,7 +51,8 @@ class Objective(BaseObjective):
             "n_features": 5,
             "n_classes": 2,
             "task": "classification",
-        }
+        },
+        "objective_label": "test",
     }
 
     def set_data(self, X, y, task, n_classes):
@@ -57,6 +66,13 @@ class Objective(BaseObjective):
         solvers can use it to skip redundant regression instances. The actual
         class count for scoring is derived from the data for classification.
         """
+        if self.objective_label is None:
+            raise ValueError(
+                "objective_label must be set via the CLI or config file, e.g. "
+                "-o \"TabICL inference[objective_label='baseline CPU run']\". "
+                "Provide a short sentence describing why this run is performed; "
+                "it is recorded as `p_objective_objective_label` in the output."
+            )
         self.task = task
         self.n_classes = n_classes  # dataset parameter, passed to solvers
         if task == "classification":
@@ -92,6 +108,8 @@ class Objective(BaseObjective):
         ram_peak_mb=0.0,
         vram_peak_mb=0.0,
         disk_offload_dir=None,
+        device="cpu",
+        gpu_name=None,
     ):
         """Score a solver's predictions and attach resource metrics.
 
@@ -100,11 +118,24 @@ class Objective(BaseObjective):
         transform to recover ``y_pred`` is done here, untimed, so it does not
         pollute the solver's prediction timing.
 
+        ``device`` and ``gpu_name`` are resolved by the solver for the device
+        it actually used (not re-detected here), so a CPU run on a GPU machine
+        correctly records ``device='cpu'``, ``gpu_name=None``.
+
         ``value`` is the quantity benchopt monitors/plots by default; it is
         defined as "lower is better" (``1 - accuracy`` for classification,
         ``rmse`` for regression).
         """
-        gpu_name, device = get_gpu_info()
+        provenance = {
+            "fit_time": fit_time,
+            "predict_time": predict_time,
+            "ram_peak_mb": ram_peak_mb,
+            "vram_peak_mb": vram_peak_mb,
+            "disk_offload_dir": disk_offload_dir,
+            "gpu_name": gpu_name,
+            "device": device,
+            **PACKAGE_VERSIONS,
+        }
         if self.task == "classification":
             # Derive class labels from probabilities (untimed scoring step).
             if y_pred is None and y_score is not None and y_encoder is not None:
@@ -120,13 +151,7 @@ class Objective(BaseObjective):
                 value=1.0 - acc,
                 accuracy=acc,
                 log_loss=ll,
-                fit_time=fit_time,
-                predict_time=predict_time,
-                ram_peak_mb=ram_peak_mb,
-                vram_peak_mb=vram_peak_mb,
-                disk_offload_dir=disk_offload_dir,
-                gpu_name=gpu_name,
-                device=device,
+                **provenance,
             )
         else:
             r = float(np.sqrt(mean_squared_error(self.y_test, y_pred)))
@@ -134,13 +159,7 @@ class Objective(BaseObjective):
                 value=r,
                 rmse=r,
                 r2=r2_score(self.y_test, y_pred),
-                fit_time=fit_time,
-                predict_time=predict_time,
-                ram_peak_mb=ram_peak_mb,
-                vram_peak_mb=vram_peak_mb,
-                disk_offload_dir=disk_offload_dir,
-                gpu_name=gpu_name,
-                device=device,
+                **provenance,
             )
 
     def get_one_result(self):
@@ -150,9 +169,16 @@ class Objective(BaseObjective):
             y_pred = np.zeros(n_test, dtype=self.y_test.dtype)
             y_score = np.ones((n_test, self.n_classes_actual)) / self.n_classes_actual
             return dict(
-                y_pred=y_pred, y_score=y_score, y_encoder=None, disk_offload_dir=None
+                y_pred=y_pred,
+                y_score=y_score,
+                y_encoder=None,
+                disk_offload_dir=None,
+                device="cpu",
+                gpu_name=None,
             )
-        return dict(y_pred=np.zeros(n_test), disk_offload_dir=None)
+        return dict(
+            y_pred=np.zeros(n_test), disk_offload_dir=None, device="cpu", gpu_name=None
+        )
 
     def get_objective(self):
         """Payload handed to every solver via ``set_objective``.

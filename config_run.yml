@@ -11,6 +11,11 @@ n-repetitions: 3
 # max-runs and timeout only apply to iterative (convergence-curve) solvers;
 # this benchmark uses sampling_strategy="run_once", so they are ignored.
 
+# Required: objective_label must be set on every run (it raises if left None).
+# Pass it via the CLI, e.g.
+#   -o "TabICL inference[objective_label='baseline CPU run']"
+# Recorded as `p_objective_objective_label` in the output parquet.
+
 dataset:
   # Default size ladder (n_samples, n_features). Classification also varies
   # n_classes in {10, 100} (see datasets/simulated.py).

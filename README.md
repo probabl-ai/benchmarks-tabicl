@@ -12,9 +12,17 @@ It records, per `(dataset, solver, parameters, repetition)` cell:
 | `fit_time`, `predict_time` | this benchmark (split inside `Solver.run`) |
 | Peak **RAM** (`ram_peak_mb`) | this benchmark (psutil sampling) |
 | Peak **VRAM** (`vram_peak_mb`) | this benchmark (`torch.cuda.max_memory_allocated`) |
-| Accuracy / log-loss, RMSE / R2 | this benchmark (numpy) |
-| CPU model, core count, system RAM, CUDA version, package versions | benchopt provenance (automatic) |
+| Accuracy / log-loss, RMSE / R2 | this benchmark (sklearn) |
+| Run label (`p_objective_objective_label`) | benchopt, from the required `objective_label` parameter |
+| `torch` / `tabicl` versions | this benchmark (`objective_torch_version`, `objective_tabicl_version`) |
+| CPU model, core count, system RAM, CUDA version, run date | benchopt provenance (automatic) |
 | GPU name + selected device | this benchmark (`objective_gpu_name`, `objective_device`) |
+
+> **`objective_label` is required.** Every run must describe *why* it is
+> performed via the `objective_label` objective parameter, e.g.
+> `-o "TabICL inference[objective_label='baseline CPU vs GPU']"`. Leaving it
+> unset raises a `ValueError`. The label is recorded as
+> `p_objective_objective_label` in the output parquet.
 
 > TabICL does not *train*: `fit` stores/prepares data, learning happens in
 > `predict` via in-context learning. Both are timed inside `run`; `fit_time`
