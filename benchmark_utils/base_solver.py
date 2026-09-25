@@ -86,6 +86,7 @@ class BaseTabICLSolver(BaseSolver):
         # parameter (see get_objective), so it's set once for all solvers.
         "n_jobs": [-1],  # use all cores on CPU
         "device": DEVICE_GRID,  # explicit; unavailable devices are skipped
+        "use_amp": ["auto"],  # automatic mixed precision; extend to sweep later
     }
 
     # --- shared implementation --------------------------------------------
@@ -164,6 +165,7 @@ class BaseTabICLSolver(BaseSolver):
             disk_offload_dir=disk_offload_dir,
             n_jobs=self.n_jobs,
             device=self.device,
+            use_amp=self.use_amp,
         )
 
     def set_objective(self, X_train, y_train, X_test, task, n_classes, scratch_dir):

@@ -60,6 +60,7 @@ WARMUP = "Warmup"
 OFFLOAD_MODE = "Offload mode"
 NB_JOBS = "Nb jobs"
 DEVICE = "Device"
+USE_AMP = "Use AMP"
 GPU_NAME = "GPU name"
 TORCH_VERSION = "Torch version"
 TABICL_VERSION = "TabICL version"
@@ -99,6 +100,7 @@ PARQUET_TABLE_DISPLAY_MAPPING = {
     "p_solver_offload_mode": OFFLOAD_MODE,
     "p_solver_n_jobs": NB_JOBS,
     "p_solver_device": DEVICE,
+    "p_solver_use_amp": USE_AMP,
     "objective_gpu_name": GPU_NAME,
     "objective_torch_version": TORCH_VERSION,
     "objective_tabicl_version": TABICL_VERSION,
@@ -184,6 +186,7 @@ SOLVER_PARAM_COLUMNS = [
     OFFLOAD_MODE,
     NB_JOBS,
     DEVICE,
+    USE_AMP,
 ]
 
 # Provenance columns (part of the dedup key).
@@ -240,6 +243,7 @@ ROW_SORT_ORDER = [
     (WARMUP, True),
     (OFFLOAD_MODE, True),
     (DEVICE, True),
+    (USE_AMP, True),
     (GPU_NAME, True),
     (SYSTEM_CPUS, True),
     (SYSTEM_PROCESSOR, True),
@@ -275,6 +279,12 @@ def _load_parquet(source):
 
     cols_to_keep = [c for c in df.columns if c not in OMITTED_PARQUET_COLUMNS]
     df = df[cols_to_keep]
+
+    # Backfill columns added after the first runs: parquets produced before
+    # use_amp was a solver parameter don't carry p_solver_use_amp. Fill with
+    # "auto" (the estimator's default) so old and new runs aggregate together.
+    if "p_solver_use_amp" not in df.columns:
+        df["p_solver_use_amp"] = "auto"
 
     df = df.rename(columns=PARQUET_TABLE_DISPLAY_MAPPING, errors="raise")
 
