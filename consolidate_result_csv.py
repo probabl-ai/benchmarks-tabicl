@@ -330,7 +330,9 @@ def _aggregate_repetitions(df):
 def _build_table(parquet_sources):
     """Load, aggregate, add benchmark ids, sort, dedup."""
     dfs = [_load_parquet(f) for f in parquet_sources]
-    df = pd.concat(dfs, ignore_index=True, copy=False) if len(dfs) > 1 else dfs[0]
+    # `copy=False` is the modern default under pandas Copy-on-Write; pass it
+    # explicitly to avoid a deprecation warning on older pandas.
+    df = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
 
     df = _aggregate_repetitions(df)
 
@@ -355,12 +357,22 @@ def _build_table(parquet_sources):
 
 
 def _sanitize_df_with_tocsv(df):
-    """Round-trip through CSV to normalize None/NaN/empty-string values."""
+    """Round-trip through CSV to normalize None/NaN/empty-string values.
+
+    Float NaN in numeric metric columns becomes the string ``"nan"`` (via
+    ``float_format_fn``). ``None`` in object columns (e.g. ``GPU name`` for
+    CPU runs) becomes empty string ``""``. Any remaining float NaN (object
+    columns that come back as NaN) is filled with ``""`` so the result is
+    JSON-serializable for the gspread upload and consistent with the CSV.
+    """
     buf = BytesIO()
     _df_to_csv(df, buf)
     buf.seek(0)
     df = pd.read_csv(buf, keep_default_na=False, na_values=[""])
     df = df[TABLE_DISPLAY_ORDER]
+    # Object columns with None round-trip as float NaN; fill with "" (empty
+    # string). Metric "nan" values are already strings, so untouched here.
+    df = df.fillna("")
     return df
 
 
@@ -416,7 +428,8 @@ def _gspread_sync(df, gspread_url, gspread_auth_key):
             GOOGLE_WORKSHEET_NAME, rows=n_rows + 1, cols=n_cols
         )
 
-    # Upload values
+    # Upload values (the df is already sanitized by _sanitize_df_with_tocsv:
+    # metric NaN → "nan" strings, object-column None → "" — no float NaN left).
     worksheet.update(
         values=[df.columns.values.tolist()] + df.values.tolist(), range_name="A1"
     )

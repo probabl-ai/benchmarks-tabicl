@@ -25,6 +25,8 @@ class Dataset(BaseDataset):
     # CLI, e.g. -d "Simulated[n_train_samples=[1000,5000],task=classification]"
     parameters = {
         "n_train_samples, n_features": [
+            (100, 10),
+            (300, 20),
             (1000, 20),
             (5000, 50),
             (10000, 100),

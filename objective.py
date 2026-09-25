@@ -15,6 +15,8 @@ RAM, CUDA version, package versions) in every result parquet. The
 accelerator actually selected by TabICL, which benchopt does not record.
 """
 
+import warnings
+
 import numpy as np
 from benchopt import BaseObjective
 from sklearn.metrics import accuracy_score, log_loss, mean_squared_error, r2_score
@@ -83,7 +85,16 @@ class Objective(BaseObjective):
             )
         self.task = task
         self.n_classes = n_classes  # dataset parameter, passed to solvers
-        self.n_classes_actual = n_classes if task == "classification" else None
+        # Compute the realized class set from the training labels, not the
+        # dataset parameter: with small n_train or many classes, some classes
+        # may be absent from y_train, and the downstream metrics must align
+        # with the labels the model actually saw (and y_score's columns).
+        if task == "classification":
+            self.classes_ = np.unique(y_train)
+            self.n_classes_actual = len(self.classes_)
+        else:
+            self.classes_ = None
+            self.n_classes_actual = None
 
         self.X_train = X_train
         self.X_test = X_test
@@ -138,25 +149,50 @@ class Objective(BaseObjective):
             # Derive class labels from probabilities (untimed scoring step).
             if y_pred is None and y_score is not None and y_encoder is not None:
                 y_pred = y_encoder.inverse_transform(np.argmax(y_score, axis=1))
-            acc = accuracy_score(self.y_test, y_pred)
-            if y_score is not None:
-                ll = log_loss(
-                    self.y_test, y_score, labels=list(range(self.n_classes_actual))
-                )
+
+            # Each metric is computed independently; a failure (e.g. a class
+            # present in y_test but absent from y_train, making log_loss
+            # undefined) sets that metric to nan and surfaces a warning, so
+            # one bad metric never aborts the whole run.
+            try:
+                acc = accuracy_score(self.y_test, y_pred)
+            except Exception as e:  # noqa: BLE001
+                warnings.warn(f"accuracy_score failed: {e}", stacklevel=2)
+                acc = float("nan")
+
+            if y_score is not None and y_encoder is not None:
+                # Use the encoder's classes_, which align 1:1 with y_score's
+                # columns and reflect the labels the model actually saw.
+                labels = list(y_encoder.classes_)
+                try:
+                    ll = log_loss(self.y_test, y_score, labels=labels)
+                except Exception as e:  # noqa: BLE001
+                    warnings.warn(f"log_loss failed: {e}", stacklevel=2)
+                    ll = float("nan")
             else:
                 ll = float("nan")
+
             return dict(
-                value=1.0 - acc,
+                value=(1.0 - acc) if not np.isnan(acc) else float("nan"),
                 accuracy=acc,
                 log_loss=ll,
                 **provenance,
             )
         else:
-            r = float(np.sqrt(mean_squared_error(self.y_test, y_pred)))
+            try:
+                r = float(np.sqrt(mean_squared_error(self.y_test, y_pred)))
+            except Exception as e:  # noqa: BLE001
+                warnings.warn(f"mean_squared_error failed: {e}", stacklevel=2)
+                r = float("nan")
+            try:
+                r2 = r2_score(self.y_test, y_pred)
+            except Exception as e:  # noqa: BLE001
+                warnings.warn(f"r2_score failed: {e}", stacklevel=2)
+                r2 = float("nan")
             return dict(
                 value=r,
                 rmse=r,
-                r2=r2_score(self.y_test, y_pred),
+                r2=r2,
                 **provenance,
             )
 
