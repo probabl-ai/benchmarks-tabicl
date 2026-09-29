@@ -36,8 +36,11 @@ datasets/simulated.py      # synthetic classification/regression grids
 solvers/tabicl_classifier.py
 solvers/tabicl_regressor.py
 benchmark_utils/           # RAM/VRAM tracker, metrics, GPU info (shipped)
+run.sh                     # focused gallery grid (scaling + offload comparisons)
 config_run.yml             # example run configuration
 test_config.py
+display/gallery_figures.py # Plotly figures for the sphinx gallery
+consolidate_result_csv.py  # parquet → CSV consolidation + Google Sheets sync
 ```
 
 ## Install
@@ -87,6 +90,40 @@ benchopt plot                  # regenerate the dashboard
 
 Use `--keep all` (not the default `last`) so identical configs run on
 different machines are not collapsed.
+
+### `run.sh` — the focused gallery grid
+
+`run.sh` is a convenience script that runs the three-command grid used to
+produce the gallery figures (`display/gallery_figures.py`). All runs are
+classification-only, `n_classes=10`, `n_jobs=4`, `n_repeat=3` (averaged).
+
+```bash
+./run.sh                       # uses the default scratch dir
+SCRATCH_DIR=/scratch/tabicl ./run.sh   # override the disk-offload scratch dir
+```
+
+| Command | What it sweeps | Cells (×3 reps) |
+| --- | --- | --- |
+| **A — scaling** | `n_train ∈ {300,1k,2k,4k,8k,16k}` at `n_features=100`; `n_features ∈ {20,40,100,200,500}` at `n_train=1000`; `n_est ∈ {1,2,4}`, `kv_cache T/F`, `n_test ∈ {2,30,500,2k,8k}` | 990 |
+| **B — offload (GPU+CPU)** | `n_train ∈ {2000,4000}`, `n_features=200`, `n_test=200`, `n_est=4`, `kv=False`; GPU `offload ∈ {gpu,cpu,disk}` + CPU `offload ∈ {cpu,disk}` | 30 |
+| **C — offload at large n_test (GPU)** | `n_train ∈ {2000,4000,8000}`, `n_features=200`, `n_test=10000`, `n_est=4`, `kv=False`; GPU `offload ∈ {gpu,cpu,disk}` | 27 |
+
+**Total: 1047 runs, ~45-75 min on a single L4.** Outputs land in `outputs/`
+as `benchopt_run_<timestamp>.parquet` (one per command). Consolidate with:
+
+```bash
+python consolidate_result_csv.py outputs/benchopt_run_*.parquet \
+    --sync-to-gspread \
+    --gspread-url "https://docs.google.com/spreadsheets/d/..." \
+    --gspread-auth-key .gspread-service-account-key/tabicl-benchmarks-*.json
+```
+
+Notes:
+- Command B keeps `n_train ≤ 4000` so CPU runs stay within a 16 GB host RAM
+  budget (CPU `offload=disk` is a no-op — the InferenceManager bypasses
+  offload logic for `device='cpu'`).
+- Command C is GPU-only at large `n_test` so the output tensor pressures
+  VRAM and the offload modes show measurable VRAM savings.
 
 ## Results
 
