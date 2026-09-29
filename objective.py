@@ -4,7 +4,11 @@ Meures, for a TabICL-based classifier or regressor on a tabular dataset:
 
 * execution walltime, split into ``fit_time`` (data preparation) and
   ``predict_time`` (in-context learning forward pass),
-* peak RAM (MB) and peak VRAM (MB) during ``fit`` + ``predict``,
+* peak RAM (MB) and peak VRAM (MB), recorded **separately for the fit and
+  predict phases** (``ram_peak_fit_mb`` / ``vram_peak_predict_mb`` and
+  ``vram_peak_fit_mb`` / ``vram_peak_predict_mb``), plus a combined
+  ``ram_peak_mb`` / ``vram_peak_mb`` (max of the two windows) as the headline
+  aggregate peak,
 * prediction quality (accuracy + log-loss for classification,
   RMSE + R2 for regression).
 
@@ -116,6 +120,10 @@ class Objective(BaseObjective):
         predict_time=0.0,
         ram_peak_mb=0.0,
         vram_peak_mb=0.0,
+        ram_peak_fit_mb=0.0,
+        vram_peak_fit_mb=0.0,
+        ram_peak_predict_mb=0.0,
+        vram_peak_predict_mb=0.0,
         disk_offload_dir=None,
         device="cpu",
         gpu_name=None,
@@ -140,6 +148,10 @@ class Objective(BaseObjective):
             "predict_time": predict_time,
             "ram_peak_mb": ram_peak_mb,
             "vram_peak_mb": vram_peak_mb,
+            "ram_peak_fit_mb": ram_peak_fit_mb,
+            "vram_peak_fit_mb": vram_peak_fit_mb,
+            "ram_peak_predict_mb": ram_peak_predict_mb,
+            "vram_peak_predict_mb": vram_peak_predict_mb,
             "disk_offload_dir": disk_offload_dir,
             "gpu_name": gpu_name,
             "device": device,

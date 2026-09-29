@@ -16,10 +16,12 @@ loaded libraries, the already-downloaded checkpoint, etc.).
   ``torch.cuda.memory_allocated()`` at ``start``, and the peak counter is
   reset right after so it only tracks the measured window).
 
-For warmup scenarios, ``ResourceTracker.start`` is called in ``warm_up`` (not
-``run``) so the peak window covers the fit (including the kv_cache build) and
-the dummy predict, and the tracker keeps running into ``run`` for the real
-predict.
+A ``ResourceTracker`` is used twice per solver run: once around ``fit``
+(capturing the fit-window peak, including the kv_cache build) and once
+around ``predict`` (capturing the predict-window peak). The two windows
+are independent: ``stop`` returns the incremental peak for its window and
+``start`` resets the baseline, so the fit and predict peaks are reported
+separately.
 
 ``cleanup_before_run(device)`` should be called *before*
 ``ResourceTracker.start`` to release any leftover state from prior runs:
@@ -107,26 +109,47 @@ class ResourceTracker:
                 pass
 
     def stop(self):
-        """Stop sampling and return the incremental peak usage dict."""
+        """Stop sampling and return the incremental usage dict.
+
+        Returns, for both RAM and VRAM, two quantities (all in MB, incremental
+        relative to the baseline captured at ``start``):
+
+        * ``{ram,vram}_peak_mb``: the peak usage observed during the window.
+        * ``{ram,vram}_end_mb``: the usage at the end of the window — i.e. the
+          memory *retained* by the work (fitted state, kv cache, etc.) that
+          persists past the window. Callers can add the prior window's
+          ``_end_mb`` to the current window's ``_peak_mb`` to get the absolute
+          footprint during the current window.
+        """
         if self._stop_event is not None:
             self._stop_event.set()
             self._thread.join(timeout=1.0)
-        # Catch a final RSS reading after the thread stopped.
+        # Catch a final RSS reading after the thread stopped; this doubles as
+        # the end-of-window RSS for the ram_end_mb field below.
+        final_rss = self.peak_rss
         with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
-            self.peak_rss = max(self.peak_rss, self.proc.memory_info().rss)
+            final_rss = self.proc.memory_info().rss
+            self.peak_rss = max(self.peak_rss, final_rss)
 
         vram_peak_mb = 0.0
+        vram_end_mb = 0.0
         if _HAS_TORCH and torch.cuda.is_available():
             try:
                 torch.cuda.synchronize()
                 peak = torch.cuda.max_memory_allocated()
                 vram_peak_mb = max(0.0, peak - self.vram_baseline) / (1024**2)
+                vram_end_mb = max(
+                    0.0, torch.cuda.memory_allocated() - self.vram_baseline
+                ) / (1024**2)
             except Exception:  # pragma: no cover - defensive
                 vram_peak_mb = 0.0
+                vram_end_mb = 0.0
 
         return {
             "ram_peak_mb": (self.peak_rss - self.baseline_rss) / (1024**2),
+            "ram_end_mb": max(0.0, final_rss - self.baseline_rss) / (1024**2),
             "vram_peak_mb": float(vram_peak_mb),
+            "vram_end_mb": float(vram_end_mb),
         }
 
 

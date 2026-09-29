@@ -49,6 +49,10 @@ FIT_TIME = "Fit time"
 PREDICT_TIME = "Predict time"
 RAM_PEAK = "RAM peak (MB)"
 VRAM_PEAK = "VRAM peak (MB)"
+RAM_PEAK_FIT = "RAM peak fit (MB)"
+VRAM_PEAK_FIT = "VRAM peak fit (MB)"
+RAM_PEAK_PREDICT = "RAM peak predict (MB)"
+VRAM_PEAK_PREDICT = "VRAM peak predict (MB)"
 ACCURACY = "Accuracy"
 LOG_LOSS = "Log loss"
 RMSE = "RMSE"
@@ -56,7 +60,6 @@ R2 = "R2"
 NB_ESTIMATORS = "Nb estimators"
 BATCH_SIZE = "Batch size"
 KV_CACHE = "KV cache"
-WARMUP = "Warmup"
 OFFLOAD_MODE = "Offload mode"
 NB_JOBS = "Nb jobs"
 DEVICE = "Device"
@@ -89,6 +92,10 @@ PARQUET_TABLE_DISPLAY_MAPPING = {
     "objective_predict_time": PREDICT_TIME,
     "objective_ram_peak_mb": RAM_PEAK,
     "objective_vram_peak_mb": VRAM_PEAK,
+    "objective_ram_peak_fit_mb": RAM_PEAK_FIT,
+    "objective_vram_peak_fit_mb": VRAM_PEAK_FIT,
+    "objective_ram_peak_predict_mb": RAM_PEAK_PREDICT,
+    "objective_vram_peak_predict_mb": VRAM_PEAK_PREDICT,
     "objective_accuracy": ACCURACY,
     "objective_log_loss": LOG_LOSS,
     "objective_rmse": RMSE,
@@ -96,7 +103,6 @@ PARQUET_TABLE_DISPLAY_MAPPING = {
     "p_solver_n_estimators": NB_ESTIMATORS,
     "p_solver_batch_size": BATCH_SIZE,
     "p_solver_kv_cache": KV_CACHE,
-    "p_solver_warmup": WARMUP,
     "p_solver_offload_mode": OFFLOAD_MODE,
     "p_solver_n_jobs": NB_JOBS,
     "p_solver_device": DEVICE,
@@ -166,6 +172,10 @@ PRIMARY_METRIC_COLUMNS = [
     PREDICT_TIME,
     RAM_PEAK,
     VRAM_PEAK,
+    RAM_PEAK_FIT,
+    VRAM_PEAK_FIT,
+    RAM_PEAK_PREDICT,
+    VRAM_PEAK_PREDICT,
 ]
 
 SANITY_METRIC_COLUMNS = [
@@ -182,7 +192,6 @@ NUMERIC_METRIC_COLUMNS = PRIMARY_METRIC_COLUMNS + SANITY_METRIC_COLUMNS
 SOLVER_PARAM_COLUMNS = [
     BATCH_SIZE,
     KV_CACHE,
-    WARMUP,
     OFFLOAD_MODE,
     NB_JOBS,
     DEVICE,
@@ -240,7 +249,6 @@ ROW_SORT_ORDER = [
     (FIT_TIME, True),
     (BATCH_SIZE, True),
     (KV_CACHE, True),
-    (WARMUP, True),
     (OFFLOAD_MODE, True),
     (DEVICE, True),
     (USE_AMP, True),
@@ -280,13 +288,16 @@ def _load_parquet(source):
     cols_to_keep = [c for c in df.columns if c not in OMITTED_PARQUET_COLUMNS]
     df = df[cols_to_keep]
 
-    # Backfill columns added after the first runs: parquets produced before
-    # use_amp was a solver parameter don't carry p_solver_use_amp. Fill with
-    # "auto" (the estimator's default) so old and new runs aggregate together.
-    if "p_solver_use_amp" not in df.columns:
-        df["p_solver_use_amp"] = "auto"
-
-    df = df.rename(columns=PARQUET_TABLE_DISPLAY_MAPPING, errors="raise")
+    # Only rename columns that are actually present in this parquet. Different
+    # runs carry different columns (e.g. classification-only parquets lack the
+    # regression metrics; regression-only parquets lack the classification
+    # metrics). errors="raise" would crash on any of these; filtering the
+    # mapping keeps consolidation robust across task-specific parquets.
+    present_mapping = {
+        src: dst for src, dst in PARQUET_TABLE_DISPLAY_MAPPING.items()
+        if src in df.columns
+    }
+    df = df.rename(columns=present_mapping)
 
     return df
 
@@ -417,7 +428,10 @@ def _gspread_sync(df, gspread_url, gspread_auth_key):
         worksheet.clear_basic_filter()
         worksheet.freeze(0, 0)
         worksheet.resize(rows=n_rows + 1, cols=n_cols)
-        worksheet.clear_notes(global_range)
+        try:
+            worksheet.clear_notes(global_range)
+        except Exception:
+            pass  # clear_notes can fail on some gspread versions; non-critical
         reset_format = dict(
             backgroundColorStyle=dict(rgbColor=dict(red=1, green=1, blue=1, alpha=1)),
             textFormat=dict(bold=False),

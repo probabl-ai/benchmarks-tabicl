@@ -1,9 +1,13 @@
 """Simulated tabular datasets for the TabICL benchmark.
 
 Uses scikit-learn's ``make_classification`` / ``make_regression`` so the
-synthetic data follows a standard, well-understood generator. The grid
-spans laptop-to-GPU regimes; override it per run with a config file or the
+synthetic data follows a standard, well-understood generator. The grid spans
+laptop-to-GPU regimes; override it per run with a config file or the
 ``-d`` CLI flag.
+
+``n_train_samples`` and ``n_features`` are independent parameters so the two
+dataset-size axes can be swept separately — vary rows at fixed columns (and
+vice-versa) to isolate the effect of each on fit/predict time and memory.
 
 The dataset generates ``n_train_samples + n_test_samples`` total samples and
 splits them into a train and a test set (the split uses a per-repetition
@@ -19,19 +23,21 @@ from sklearn.datasets import make_classification, make_regression
 class Dataset(BaseDataset):
     name = "Simulated"
 
-    # Cross product over (n_train_samples, n_features), the test-set size, the
-    # task type, and the number of classes (used only for classification). Each
-    # combination is a distinct dataset instance. Override any subset from the
-    # CLI, e.g. -d "Simulated[n_train_samples=[1000,5000],task=classification]"
+    # ``n_train_samples`` and ``n_features`` are INDEPENDENT parameters so the
+    # two dataset-size axes can be swept separately (essential for scaling
+    # plots: vary rows at fixed columns, and vice-versa). Override from the CLI
+    # with ``-d`` and list a dataset more than once to run a union of grids,
+    # e.g. a rows sweep + a columns sweep in one command:
+    #   -d "Simulated[n_train_samples=[300,1000,2000,4000],n_features=50,...]"
+    #   -d "Simulated[n_train_samples=1000,n_features=[20,40,100,200],...]"
+    #
+    # WARNING: the full default cartesian product below is large
+    # (8 × 6 × 4 × 2 × 2 = 768 dataset instances). Always restrict with ``-d``
+    # for a real run — the default grid is intentionally broad so any size the
+    # benchmark has ever used stays selectable without a code change.
     parameters = {
-        "n_train_samples, n_features": [
-            (100, 10),
-            (300, 20),
-            (1000, 20),
-            (5000, 50),
-            (10000, 100),
-            (50000, 100),
-        ],
+        "n_train_samples": [100, 300, 1000, 2000, 4000, 5000, 10000, 50000],
+        "n_features": [10, 20, 40, 50, 100, 200],
         "n_test_samples": [1, 32, 512, 2048],
         "n_classes": [10, 100],
         "task": ["classification", "regression"],
