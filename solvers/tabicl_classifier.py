@@ -28,7 +28,6 @@ class Solver(BaseTabICLSolver):
         # Shrink the solver grid for `benchopt test` speed.
         "n_estimators": 1,
         "kv_cache": False,
-        "warmup": False,
         "offload_mode": "auto",
         "device": "cpu",
     }

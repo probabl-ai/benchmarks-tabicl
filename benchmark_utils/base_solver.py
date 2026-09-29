@@ -7,22 +7,22 @@ the concrete subclass, and everything else lives here.
 
 Measurement windows
 -------------------
-Two axes cross to form four scenarios:
+``run`` always does ``fit`` then ``predict`` inline (benchopt's ``time``
+covers both). Peak RAM and peak VRAM are recorded **separately for the fit
+and predict phases**: a ``ResourceTracker`` is started before fit and
+stopped right after fit (``resources_fit``), then a fresh tracker is started
+before predict and stopped after predict (``resources_predict``). A combined
+``ram_peak_mb`` / ``vram_peak_mb`` (max of the two windows) is also reported
+as the headline aggregate peak.
 
-* ``warmup`` (True/False): whether ``fit`` + a dummy 2-row ``predict`` run
-  ahead of time (in ``warm_up``, untimed by benchopt but covered by the
-  ResourceTracker) or inline in ``run`` (timed by benchopt).
-* ``kv_cache`` (True/False): whether ``fit`` builds the KV cache.
-
-| warmup | kv_cache | benchopt ``time``        | peak RAM/VRAM window              |
-|--------|----------|--------------------------|-----------------------------------|
-| True   | True     | predict only             | fit(cache) + dummy predict + pred |
-| True   | False    | predict only             | fit + dummy predict + predict     |
-| False  | True     | fit + predict            | fit(cache) + predict              |
-| False  | False    | fit + predict            | fit + predict                     |
+| kv_cache | benchopt ``time`` | fit-window peak | predict-window peak |
+|----------|-------------------|-----------------|---------------------|
+| True     | fit + predict     | fit(cache)      | predict             |
+| False    | fit + predict     | fit             | predict             |
 
 ``fit_time`` and ``predict_time`` are always reported separately as objective
-metrics, so the breakdown is recoverable regardless of the scenario.
+metrics. The per-phase peaks (``ram_peak_fit_mb``, ``vram_peak_predict_mb``,
+``vram_peak_fit_mb``, ``vram_peak_predict_mb``) are also reported.
 """
 
 import shutil
@@ -30,7 +30,6 @@ import tempfile
 import time
 from pathlib import Path
 
-import numpy as np
 import tabicl
 from benchopt import BaseSolver
 
@@ -47,10 +46,6 @@ from benchmark_utils.memory_tracking import (
 
 # Verified once at import; the same default applies to both estimators.
 _DEFAULT_BATCH_SIZE = check_default_batch_size(tabicl.TabICLClassifier)
-
-# Number of rows used for the dummy warm-up predict (just enough to trigger
-# CUDA kernel autotuning / cuDNN JIT / FA3 JIT for the forward pass).
-_WARMUP_N_ROWS = 2
 
 
 class BaseTabICLSolver(BaseSolver):
@@ -69,8 +64,8 @@ class BaseTabICLSolver(BaseSolver):
         If True, ``run`` also calls ``predict_proba`` and returns ``y_score``
         (classifier only).
     test_config : dict
-        Per-subclass fast config for ``benchopt test`` (must pin ``task``,
-        ``device``, and ``warmup``).
+        Per-subclass fast config for ``benchopt test`` (must pin ``task`` and
+        ``device``).
     """
 
     # --- subclass-overridden hooks ----------------------------------------
@@ -80,7 +75,6 @@ class BaseTabICLSolver(BaseSolver):
         "n_estimators": [1, 2, 4, 8],
         "batch_size": [_DEFAULT_BATCH_SIZE],  # default; extend to sweep later
         "kv_cache": [False, True],
-        "warmup": [True, False],
         "offload_mode": ["auto", "gpu", "cpu", "disk"],
         # No disk_offload_dir here — it comes from the objective's scratch_dir
         # parameter (see get_objective), so it's set once for all solvers.
@@ -176,17 +170,13 @@ class BaseTabICLSolver(BaseSolver):
         self.scratch_dir = scratch_dir
         # Default; overwritten when an estimator is built.
         self._disk_offload_dir_used = None
-        # Estimator is built in warm_up (warmup=True) or in run (warmup=False).
+        # Estimator is built in run().
         self.estimator = None
-        # Resource tracker lives across warm_up + run when warmup=True, so the
-        # peak memory window covers the fit (including kv_cache build).
-        self._tracker = None
-        # Benchopt's _warm_up has a "run once" guard (_warmup_done) that persists
-        # across datasets when the solver instance is reused (sequential runs).
-        # Clear it so warm_up re-runs for each new dataset — otherwise the
-        # estimator from the previous dataset (or None if set_objective reset
-        # it) is used by run(), causing a stale/None estimator error.
-        self._warmup_done = None
+        # Resource trackers are per-phase: _tracker_fit covers the fit window,
+        # _tracker_predict covers the predict window. Each is started/stopped
+        # independently so peak RAM/VRAM is recorded separately per phase.
+        self._tracker_fit = None
+        self._tracker_predict = None
 
     def _predict(self, X):
         """Run the timed prediction on ``X``.
@@ -206,82 +196,86 @@ class BaseTabICLSolver(BaseSolver):
         y_pred = self.estimator.predict(X)
         return y_pred, None, None
 
-    # --- warmup scenarios (1 & 4) -----------------------------------------
-
-    def _warmup_input(self):
-        """Return a tiny dummy test set with subtle noise for the warm-up predict.
-
-        Takes the first ``_WARMUP_N_ROWS`` rows of the real test set and adds
-        small per-column Gaussian noise (1e-3 of each column's std, floored
-        to avoid zero scale on constant columns). This ensures the warm-up
-        rows differ from the real test rows so the timed predict cannot
-        benefit from any data-level memoization, while the warm-up still
-        triggers forward-pass kernel / cuDNN / FA3 autotuning.
-        """
-        X = np.array(self.X_test[:_WARMUP_N_ROWS], dtype=float, copy=True)
-        # Fixed seed: the noise only needs to differ from the real data, not
-        # be random across runs.
-        rng = np.random.default_rng(0)
-        col_std = X.std(axis=0, keepdims=True)
-        # 1e-3 relative scale + 1e-6 floor for constant/zero-variance columns.
-        noise_scale = 1e-3 * col_std + 1e-6
-        X += rng.standard_normal(X.shape) * noise_scale
-        return X
-
     def warm_up(self):
-        """Pre-fit + dummy predict ahead of the timed run (warmup=True only).
-
-        Starts the ResourceTracker here so peak RAM/VRAM covers the fit
-        (including the kv_cache build) and the dummy forward pass that warms
-        up CUDA kernels / cuDNN JIT / FA3 JIT. The tracker keeps running into
-        ``run``, which only does the real predict.
+        """Untimed fit + predict on a tiny dummy slice to trigger CUDA kernel /
+        cuDNN / FA3 JIT autotuning. ``run`` builds its own fresh estimator, so
+        this one is discarded.
         """
-        # Clean baseline before any allocation: release leftover state from
-        # prior runs (gc + empty_cache on the matching accelerator backend).
+        import gc
+
+        import numpy as np
+
+        est = self._build_estimator()
+        n_feat = self.X_train.shape[1]
+        rng = np.random.default_rng(0)
+        X_fit = rng.standard_normal((2, n_feat))
+        X_pred = rng.standard_normal((2, n_feat))
+        if self.task == "classification":
+            y_fit = np.zeros(2, dtype=self.y_train.dtype)
+        else:
+            y_fit = np.zeros(2, dtype=self.y_train.dtype)
+        est.fit(X_fit, y_fit)
+        if self.needs_proba:
+            est.predict_proba(X_pred)
+        else:
+            est.predict(X_pred)
+        del est
+        gc.collect()
         cleanup_before_run(self.device)
-
-        if not self.warmup:
-            return  # scenario 2 or 3: everything happens in run()
-
-        self.estimator = self._build_estimator()
-
-        self._tracker = ResourceTracker()
-        self._tracker.start()
-
-        t0 = time.perf_counter()
-        self.estimator.fit(self.X_train, self.y_train)
-        self.fit_time = time.perf_counter() - t0
-
-        # Dummy predict on a tiny noisy slice to trigger forward-pass kernel
-        # autotuning without the full predict cost (and without reusing the
-        # exact rows the timed predict will see — see ``_warmup_input``).
-        self._predict(self._warmup_input())
 
     # --- timed run --------------------------------------------------------
 
     def run(self, stop_val):
-        if self.warmup:
-            # Estimator and tracker are already live from warm_up; just do the
-            # real (timed) predict.
-            t0 = time.perf_counter()
-            self.y_pred, self.y_score, self.y_encoder = self._predict(self.X_test)
-            self.predict_time = time.perf_counter() - t0
-            self.resources = self._tracker.stop()
-        else:
-            self.estimator = self._build_estimator()
+        # Clean baseline before any allocation: release leftover state from
+        # prior runs (gc + empty_cache on the matching accelerator backend).
+        cleanup_before_run(self.device)
 
-            self._tracker = ResourceTracker()
-            self._tracker.start()
+        self.estimator = self._build_estimator()
 
-            t0 = time.perf_counter()
-            self.estimator.fit(self.X_train, self.y_train)
-            t1 = time.perf_counter()
-            self.y_pred, self.y_score, self.y_encoder = self._predict(self.X_test)
-            t2 = time.perf_counter()
+        # Fit window: tracker covers the fit (incl. kv_cache build) only.
+        self._tracker_fit = ResourceTracker()
+        self._tracker_fit.start()
+        t0 = time.perf_counter()
+        self.estimator.fit(self.X_train, self.y_train)
+        t1 = time.perf_counter()
+        self.resources_fit = self._tracker_fit.stop()
 
-            self.resources = self._tracker.stop()
-            self.fit_time = t1 - t0
-            self.predict_time = t2 - t1
+        # Predict window: fresh tracker, baseline is the post-fit state so
+        # the peak reflects only the incremental predict allocations.
+        self._tracker_predict = ResourceTracker()
+        self._tracker_predict.start()
+        self.y_pred, self.y_score, self.y_encoder = self._predict(self.X_test)
+        t2 = time.perf_counter()
+        self.resources_predict = self._tracker_predict.stop()
+
+        self.fit_time = t1 - t0
+        self.predict_time = t2 - t1
+
+        # Predict-phase footprint accounting for the resident fit state (e.g.
+        # the kv cache, the fitted estimator) that persists into predict: the
+        # predict window's baseline is the post-fit state, so its peak is only
+        # the *incremental* predict allocations. Adding the fit window's
+        # end-of-window usage (the retained fit state) gives the absolute
+        # footprint during predict — closer to a real inference workload.
+        ram_predict_abs = (
+            self.resources_fit["ram_end_mb"]
+            + self.resources_predict["ram_peak_mb"]
+        )
+        vram_predict_abs = (
+            self.resources_fit["vram_end_mb"]
+            + self.resources_predict["vram_peak_mb"]
+        )
+
+        # Combined peak (max of the fit and predict windows). The predict
+        # contribution is the absolute footprint (resident fit state + predict
+        # peak), not the pure incremental peak. This is the headline aggregate
+        # the figures plot.
+        self.resources = {
+            "ram_peak_mb": max(self.resources_fit["ram_peak_mb"], ram_predict_abs),
+            "vram_peak_mb": max(self.resources_fit["vram_peak_mb"], vram_predict_abs),
+            "ram_peak_predict_mb": ram_predict_abs,
+            "vram_peak_predict_mb": vram_predict_abs,
+        }
 
         # Offload files are no longer needed once predict is done; remove the
         # per-run temp dir so the scratch dir doesn't fill up across runs.
@@ -299,8 +293,17 @@ class BaseTabICLSolver(BaseSolver):
             y_encoder=self.y_encoder,
             fit_time=self.fit_time,
             predict_time=self.predict_time,
+            # Combined peak (max of fit & predict windows) — headline aggregate.
             ram_peak_mb=self.resources["ram_peak_mb"],
             vram_peak_mb=self.resources["vram_peak_mb"],
+            # Fit-phase peak: incremental peak within the fit window.
+            ram_peak_fit_mb=self.resources_fit["ram_peak_mb"],
+            vram_peak_fit_mb=self.resources_fit["vram_peak_mb"],
+            # Predict-phase peak: absolute footprint during predict — the fit
+            # window's retained state (e.g. kv cache) + the predict window's
+            # incremental peak. Closer to a real inference workload.
+            ram_peak_predict_mb=self.resources["ram_peak_predict_mb"],
+            vram_peak_predict_mb=self.resources["vram_peak_predict_mb"],
             disk_offload_dir=self._disk_offload_dir_used,
             device=device,
             gpu_name=gpu_name,

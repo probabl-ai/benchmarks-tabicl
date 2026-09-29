@@ -22,9 +22,21 @@
 # Solvers create a `disk-offload/` subdir inside it with per-run temp dirs.
 
 # dataset:
-  # Default size ladder (n_train_samples, n_features). Classification also
-  # varies n_classes in {10, 100} and n_test_samples in {1, 32, 512, 2048}
-  # (see datasets/simulated.py).
+  # n_train_samples and n_features are INDEPENDENT parameters, so the two
+  # dataset-size axes can be swept separately (rows at fixed columns, and
+  # vice-versa). List a dataset more than once to run a UNION of grids.
+  # Classification also varies n_classes in {10, 100} and n_test_samples in
+  # {1, 32, 512, 2048} (see datasets/simulated.py).
+  #
+  # WARNING: the full default cartesian product is large
+  # (8 × 6 × 4 × 2 × 2 = 768 dataset instances). Always restrict with `-d`.
+  #
+  # Scaling grid (see run.sh): vary rows at fixed columns, and columns at fixed
+  # rows, to isolate each axis's effect on time/memory:
+  # - "Simulated[n_train_samples=[300,1000,2000,4000],n_features=50,task=classification,n_classes=10,n_test_samples=512]"
+  # - "Simulated[n_train_samples=1000,n_features=[20,40,100,200],task=classification,n_classes=10,n_test_samples=512]"
+  #
+  # Size ladder (legacy, rows & columns coupled — kept for backward compat):
   # - "Simulated[n_train_samples=1000,n_features=20]"
   # - "Simulated[n_train_samples=5000,n_features=50]"
   # - "Simulated[n_train_samples=10000,n_features=100]"

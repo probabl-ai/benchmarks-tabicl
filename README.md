@@ -117,7 +117,6 @@ final = (
   | `n_estimators` | `1, 2, 4, 8` | ensemble size |
   | `batch_size` | `8` | default; extend to sweep |
   | `kv_cache` | `False, True` | cache built during `fit` |
-  | `warmup` | `True, False` | pre-fit + dummy predict ahead of the timed run |
   | `offload_mode` | `auto, gpu, cpu, disk` | `disk` uses the objective's `scratch_dir` |
   | `n_jobs` | `-1` | use all CPU cores |
   | `device` | `cpu, cuda, mps, xpu` | explicit; runs for unavailable devices are skipped |
@@ -129,22 +128,23 @@ final = (
   | `objective_label` | required | short free-text label describing why this run is performed |
   | `scratch_dir` | `None` | shared scratch location; solvers that use `offload_mode='disk'` create a `disk-offload/` subdir inside it (with a per-run temp dir). Required when any solver uses `offload_mode='disk'` (skipped otherwise). |
 
-  ``warmup`` and ``kv_cache`` cross to form four measurement scenarios:
+  Each run does `fit` then `predict` inline (benchopt's `time` covers both).
+  Peak RAM and peak VRAM are recorded **separately for the fit and predict
+  phases** (a `ResourceTracker` is started/stopped around each), in addition
+  to a combined `ram_peak_mb` / `vram_peak_mb` (max of the two windows) as the
+  headline aggregate peak:
 
-  | warmup | kv_cache | benchopt `time` | peak RAM/VRAM window |
-  |--------|----------|----------------|----------------------|
-  | True   | True     | predict only   | fit(cache) + dummy predict + predict |
-  | True   | False    | predict only   | fit + dummy predict + predict |
-  | False  | True     | fit + predict  | fit(cache) + predict |
-  | False  | False    | fit + predict  | fit + predict |
+  | kv_cache | benchopt `time` | fit-window peak | predict-window peak |
+  |----------|----------------|----------------|---------------------|
+  | True     | fit + predict  | fit(cache)     | predict             |
+  | False    | fit + predict  | fit            | predict             |
 
   ``fit_time`` and ``predict_time`` are always reported separately, so the
-  breakdown is recoverable regardless of scenario. Note that benchopt's
-  ``time`` column covers predict only when ``warmup=True`` and fit+predict
-  when ``warmup=False`` — compare across scenarios via ``fit_time`` /
-  ``predict_time``, not ``time`` alone.
+  breakdown is recoverable. The per-phase peaks (`ram_peak_fit_mb`,
+  `vram_peak_predict_mb`, `vram_peak_fit_mb`, `vram_peak_predict_mb`) let the
+  fit and predict memory costs be plotted independently.
 
-  Full grid = 4 × 2 × 2 × 4 = 64 configs per dataset; restrict with `-s` for
+  Full grid = 4 × 2 × 4 = 32 configs per dataset; restrict with `-s` for
   faster iteration. For disk offload, pass `scratch_dir=/path/to/dir` via the
   objective (e.g. `-o "TabICL inference[scratch_dir=/scratch]"`).
 
