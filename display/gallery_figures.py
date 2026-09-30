@@ -50,23 +50,52 @@ from consolidate_result_csv import (
 # Visual identity (kept from the previous version)
 # ---------------------------------------------------------------------------
 
-# KV-cache comparison
-COLOR_CACHE_OFF = "#6b7280"  # slate
-COLOR_CACHE_ON = "#dc2626"  # crimson
+# Kv-cache comparison — Okabe-Ito colorblind-safe palette.
+COLOR_CACHE_OFF = "#009E73"  # bluish green
+COLOR_CACHE_ON = "#D55E00"  # vermillion
 MARKER_CACHE_OFF = "circle"
 MARKER_CACHE_ON = "square"
 
-# Offload comparison (Figure 3) — one color per device × offload config
-COLOR_GPU_GPU = "#2563eb"    # blue   — GPU, offload=gpu
-COLOR_GPU_CPU = "#0891b2"   # teal   — GPU, offload=cpu
-COLOR_GPU_DISK = "#7c3aed"  # purple — GPU, offload=disk
-COLOR_CPU_CPU = "#ea580c"   # orange — CPU, offload=cpu
-COLOR_CPU_DISK = "#dc2626"  # crimson— CPU, offload=disk
+# Offload comparison (Figure 3) — Okabe-Ito colorblind-safe palette, one color
+# per device x offload config (no color reused across meanings).
+COLOR_GPU_GPU = "#0072B2"  # blue         — GPU, offload=gpu
+COLOR_GPU_CPU = "#56B4E9"  # sky blue     — GPU, offload=cpu
+COLOR_GPU_DISK = "#CC79A7"  # reddish purple— GPU, offload=disk
+COLOR_CPU_CPU = "#E69F00"  # orange       — CPU, offload=cpu
+COLOR_CPU_DISK = "#D55E00"  # vermillion   — CPU, offload=disk
+
+# Figure 3 bar metric colors — Okabe-Ito, distinct from each other and from
+# the offload-config colors above.
+COLOR_BAR_TIME = "#000000"  # black   — predict time
+COLOR_BAR_RAM = "#0072B2"  # blue    — RAM peak
+COLOR_BAR_VRAM = "#D55E00"  # vermillion — VRAM peak
 MARKER_GPU_GPU = "circle"
 MARKER_GPU_CPU = "diamond"
 MARKER_GPU_DISK = "square"
 MARKER_CPU_CPU = "triangle-up"
 MARKER_CPU_DISK = "triangle-down"
+
+# ---------------------------------------------------------------------------
+# Margin profiles. Two rendering targets share the same figure builders:
+#   * ``default`` — generous margins for direct/standalone HTML viewing.
+#   * ``gallery``  — tight margins tuned for the narrow sphinx-gallery column.
+# The ``<br>`` title/subtitle wrapping and the annotation-based title
+# positioning are correctness (identical in both); only the horizontal margins,
+# inter-subplot spacing, and y-axis title standoff differ. The plot area is
+# fixed at 240 px tall in both, so vertical proportions never change.
+# ---------------------------------------------------------------------------
+_DEFAULT_LR = (80, 80)  # generous left/right for standalone viewing
+_GALLERY_LR = (20, 0)  # tight for the narrow gallery column
+_DEFAULT_YSTANDOFF = None  # plotly default
+_GALLERY_YSTANDOFF = 6
+
+
+def _hspacing(fig_key: str, gallery: bool) -> float:
+    """Inter-subplot horizontal spacing per figure kind and target."""
+    if fig_key == "fig3":
+        return 0.08 if gallery else 0.12
+    return 0.04 if gallery else 0.07
+
 
 # Run-label filters
 LABEL_SCALING = "rows & cols scaling"
@@ -77,6 +106,7 @@ LABEL_OFFLOAD_LARGE_NTEST = "GPU offload at large n_test"
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
+
 
 def _lighten(hex_color: str, factor: float = 0.55) -> str:
     """Return a lighter shade of a hex colour (mix with white by ``factor``)."""
@@ -89,9 +119,12 @@ def _lighten(hex_color: str, factor: float = 0.55) -> str:
 
 
 def _parse_mean(value):
-    """Extract the mean from a ``mean±std`` string (consolidated repetition
-    average) or return the value as-is if already numeric/empty."""
+    """Extract the mean from a ``mean±std`` repetition-average string.
+
+    Returns the value as-is if already numeric/empty.
+    """
     import math
+
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return float("nan")
     if isinstance(value, (int, float)):
@@ -118,11 +151,21 @@ def load_results(csv_path: str | Path = "results/results.csv") -> pd.DataFrame:
 
     for col in (KV_CACHE,):
         if col in df.columns:
-            df[col] = df[col].astype(str).str.strip().map(
-                {"True": True, "False": False, "true": True, "false": False}
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.strip()
+                .map({"True": True, "False": False, "true": True, "false": False})
             )
 
-    for col in (FIT_TIME, PREDICT_TIME, RAM_PEAK, VRAM_PEAK, VRAM_PEAK_FIT, VRAM_PEAK_PREDICT):
+    for col in (
+        FIT_TIME,
+        PREDICT_TIME,
+        RAM_PEAK,
+        VRAM_PEAK,
+        VRAM_PEAK_FIT,
+        VRAM_PEAK_PREDICT,
+    ):
         if col in df.columns:
             df[col] = df[col].map(_parse_mean)
 
@@ -131,27 +174,23 @@ def load_results(csv_path: str | Path = "results/results.csv") -> pd.DataFrame:
 
 def _agg(df: pd.DataFrame, by: list[str], metric: str) -> pd.DataFrame:
     """Group by ``by`` and take the mean of ``metric``."""
-    return (
-        df.groupby(by, dropna=False, sort=False)[metric]
-        .mean()
-        .reset_index()
-    )
+    return df.groupby(by, dropna=False, sort=False)[metric].mean().reset_index()
 
 
 # ---------------------------------------------------------------------------
 # Figure 1 — KV cache: predict & fit+predict vs rows, cols, test-set size
 # ---------------------------------------------------------------------------
 
-def build_fig1_kv_cache(df: pd.DataFrame) -> go.Figure:
-    """Predict and fit+predict time vs three dataset-size axes, KV cache OFF
-    vs ON.
+
+def build_fig1_kv_cache(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
+    """Predict and fit+predict time vs dataset size (3 axes), KV cache OFF vs ON.
 
     Layout: 1 row × 3 cols. Each cell plots four lines:
 
-        * predict       — kv OFF (slate, dashed)
-        * predict       — kv ON  (crimson, dashed)
-        * fit+predict   — kv OFF (slate, solid)
-        * fit+predict   — kv ON  (crimson, solid)
+        * predict       — kv OFF (green, dashed)
+        * predict       — kv ON  (vermillion, dashed)
+        * fit+predict   — kv OFF (green, solid)
+        * fit+predict   — kv ON  (vermillion, solid)
 
       * row 1: vs n_train     (rows sweep; n_features=100, n_test=2000)
       * row 2: vs n_features  (cols sweep; n_train=1000,  n_test=2000)
@@ -166,22 +205,34 @@ def build_fig1_kv_cache(df: pd.DataFrame) -> go.Figure:
 
     # (row, x-axis column, filter dict, x-axis title, subplot title)
     rows_spec = [
-        (1, NB_TRAIN_SAMPLES, {NB_FEATURES: 100, NB_TEST_SAMPLES: 2000},
-         "Number of train rows",
-         "Time vs number of train rows  (n_features=100, n_test=2000)"),
-        (2, NB_FEATURES, {NB_TRAIN_SAMPLES: 1000, NB_TEST_SAMPLES: 2000},
-         "Number of features",
-         "Time vs number of features  (n_train=1000, n_test=2000)"),
-        (3, NB_TEST_SAMPLES, {NB_TRAIN_SAMPLES: 4000, NB_FEATURES: 100},
-         "Test-set size",
-         "Time vs test-set size  (n_train=4000, n_features=100)"),
+        (
+            1,
+            NB_TRAIN_SAMPLES,
+            {NB_FEATURES: 100, NB_TEST_SAMPLES: 2000},
+            "Number of train rows",
+            "Time vs number of train rows<br>(n_features=100, n_test=2000)",
+        ),
+        (
+            2,
+            NB_FEATURES,
+            {NB_TRAIN_SAMPLES: 1000, NB_TEST_SAMPLES: 2000},
+            "Number of features",
+            "Time vs number of features<br>(n_train=1000, n_test=2000)",
+        ),
+        (
+            3,
+            NB_TEST_SAMPLES,
+            {NB_TRAIN_SAMPLES: 4000, NB_FEATURES: 100},
+            "Test-set size",
+            "Time vs test-set size<br>(n_train=4000, n_features=100)",
+        ),
     ]
 
     fig = make_subplots(
         rows=1,
         cols=3,
         subplot_titles=[title for _, _, _, _, title in rows_spec],
-        horizontal_spacing=0.07,
+        horizontal_spacing=_hspacing("fig12", gallery),
     )
 
     # (kv value, color, marker, kv_name)
@@ -219,7 +270,8 @@ def build_fig1_kv_cache(df: pd.DataFrame) -> go.Figure:
                             f"<extra>kv {kv_name}</extra>"
                         ),
                     ),
-                    row=1, col=col_idx,
+                    row=1,
+                    col=col_idx,
                 )
 
         fig.update_xaxes(type="log", title_text=x_title, row=1, col=col_idx)
@@ -230,11 +282,13 @@ def build_fig1_kv_cache(df: pd.DataFrame) -> go.Figure:
     _finalize(
         fig,
         title="Figure 1 — KV cache: predict and fit+predict time vs dataset size",
-        subtitle="GPU (NVIDIA L4), classification, 10 classes, n_estimators=4, offload=gpu. "
-                 "Lines: predict (dashed), fit+predict (solid); "
-                 "kv cache OFF (slate) vs ON (crimson). Log axes.",
+        subtitle="GPU (NVIDIA L4), classification, 10 classes, "
+        "n_estimators=4, offload=gpu.<br>"
+        "Lines: predict (dashed), fit+predict (solid); "
+        "kv cache OFF (green) vs ON (vermillion). Log axes.",
         height=560,
         legend_title="KV cache × metric",
+        gallery=gallery,
     )
     return fig
 
@@ -243,14 +297,15 @@ def build_fig1_kv_cache(df: pd.DataFrame) -> go.Figure:
 # Figure 2 — Peak VRAM vs dataset size (kv cache OFF vs ON)
 # ---------------------------------------------------------------------------
 
-def build_fig2_vram(df: pd.DataFrame) -> go.Figure:
+
+def build_fig2_vram(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
     """Peak VRAM vs three dataset-size axes, KV cache OFF vs ON.
 
     Layout: 1 row × 3 cols. Each cell plots three lines:
 
-        * predict       — kv OFF (slate, dashed)
-        * predict       — kv ON  (crimson, dashed)
-        * fit           — kv ON  (crimson, solid)
+        * predict       — kv OFF (green, dashed)
+        * predict       — kv ON  (vermillion, dashed)
+        * fit           — kv ON  (vermillion, solid)
 
     ``kv OFF — fit`` is omitted: it is constant at ~110 MB across all axes
     (the estimator's small footprint, no kv cache built) and would just sit
@@ -281,22 +336,34 @@ def build_fig2_vram(df: pd.DataFrame) -> go.Figure:
 
     # (col, x-axis column, filter dict, x-axis title, subplot title)
     rows_spec = [
-        (1, NB_TRAIN_SAMPLES, {NB_FEATURES: 100, NB_TEST_SAMPLES: 2000},
-         "Number of train rows",
-         "VRAM vs number of train rows  (n_features=100, n_test=2000)"),
-        (2, NB_FEATURES, {NB_TRAIN_SAMPLES: 1000, NB_TEST_SAMPLES: 2000},
-         "Number of features",
-         "VRAM vs number of features  (n_train=1000, n_test=2000)"),
-        (3, NB_TEST_SAMPLES, {NB_TRAIN_SAMPLES: 4000, NB_FEATURES: 100},
-         "Test-set size",
-         "VRAM vs test-set size  (n_train=4000, n_features=100)"),
+        (
+            1,
+            NB_TRAIN_SAMPLES,
+            {NB_FEATURES: 100, NB_TEST_SAMPLES: 2000},
+            "Number of train rows",
+            "VRAM vs number of train rows<br>(n_features=100, n_test=2000)",
+        ),
+        (
+            2,
+            NB_FEATURES,
+            {NB_TRAIN_SAMPLES: 1000, NB_TEST_SAMPLES: 2000},
+            "Number of features",
+            "VRAM vs number of features<br>(n_train=1000, n_test=2000)",
+        ),
+        (
+            3,
+            NB_TEST_SAMPLES,
+            {NB_TRAIN_SAMPLES: 4000, NB_FEATURES: 100},
+            "Test-set size",
+            "VRAM vs test-set size<br>(n_train=4000, n_features=100)",
+        ),
     ]
 
     fig = make_subplots(
         rows=1,
         cols=3,
         subplot_titles=[title for _, _, _, _, title in rows_spec],
-        horizontal_spacing=0.07,
+        horizontal_spacing=_hspacing("fig12", gallery),
     )
 
     # Per-kv metric sets. ``kv OFF — fit`` is omitted: it is constant at
@@ -304,13 +371,25 @@ def build_fig2_vram(df: pd.DataFrame) -> go.Figure:
     # built), so it would just sit flat at the bottom of the log plot.
     kv_metrics = [
         # (kv value, color, marker, kv_name, [(metric, dash, lw, metric_name), ...])
-        (False, COLOR_CACHE_OFF, MARKER_CACHE_OFF, "OFF", [
-            (VRAM_PEAK_PREDICT, "dash", 2.5, "predict"),
-        ]),
-        (True, COLOR_CACHE_ON, MARKER_CACHE_ON, "ON", [
-            (VRAM_PEAK_PREDICT, "dash", 2.5, "predict"),
-            (VRAM_PEAK_FIT, "solid", 3.5, "fit"),
-        ]),
+        (
+            False,
+            COLOR_CACHE_OFF,
+            MARKER_CACHE_OFF,
+            "OFF",
+            [
+                (VRAM_PEAK_PREDICT, "dash", 2.5, "predict"),
+            ],
+        ),
+        (
+            True,
+            COLOR_CACHE_ON,
+            MARKER_CACHE_ON,
+            "ON",
+            [
+                (VRAM_PEAK_PREDICT, "dash", 2.5, "predict"),
+                (VRAM_PEAK_FIT, "solid", 3.5, "fit"),
+            ],
+        ),
     ]
 
     for col_idx, x_col, filt, x_title, _ in rows_spec:
@@ -336,7 +415,8 @@ def build_fig2_vram(df: pd.DataFrame) -> go.Figure:
                             f"<extra>kv {kv_name}</extra>"
                         ),
                     ),
-                    row=1, col=col_idx,
+                    row=1,
+                    col=col_idx,
                 )
 
         fig.update_xaxes(type="log", title_text=x_title, row=1, col=col_idx)
@@ -347,13 +427,15 @@ def build_fig2_vram(df: pd.DataFrame) -> go.Figure:
     _finalize(
         fig,
         title="Figure 2 — KV cache: peak VRAM (fit, predict) vs dataset size",
-        subtitle="GPU (NVIDIA L4), classification, 10 classes, n_estimators=4, offload=gpu. "
-                 "Lines: fit (solid), predict (dashed); "
-                 "predict = resident fit state + predict peak. "
-                 "kv OFF — fit is omitted (constant ~110 MB, negligible). "
-                 "kv OFF (slate) vs ON (crimson). Log axes.",
+        subtitle="GPU (NVIDIA L4), classification, 10 classes, "
+        "n_estimators=4, offload=gpu.<br>"
+        "Lines: fit (solid), predict (dashed); "
+        "predict = resident fit state + predict peak.<br>"
+        "kv OFF — fit is omitted (constant ~110 MB, negligible).<br>"
+        "kv OFF (green) vs ON (vermillion). Log axes.",
         height=560,
         legend_title="KV cache × phase",
+        gallery=gallery,
     )
     return fig
 
@@ -362,7 +444,8 @@ def build_fig2_vram(df: pd.DataFrame) -> go.Figure:
 # Figure 3 — Offload comparison: GPU vs CPU, offload modes
 # ---------------------------------------------------------------------------
 
-def build_fig3_offload(df: pd.DataFrame) -> go.Figure:
+
+def build_fig3_offload(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
     """Offload comparison: GPU vs CPU (left) and GPU offload at large n_test (right).
 
     Layout: 1 row × 2 cols.
@@ -387,8 +470,8 @@ def build_fig3_offload(df: pd.DataFrame) -> go.Figure:
     sub_b = sub_b[(sub_b[NB_TRAIN_SAMPLES] == 4000) & (sub_b[NB_ESTIMATORS] == 4)]
 
     gpu_configs = [
-        ("cuda", "gpu",  "GPU — offload=gpu"),
-        ("cuda", "cpu",  "GPU — offload=cpu"),
+        ("cuda", "gpu", "GPU — offload=gpu"),
+        ("cuda", "cpu", "GPU — offload=cpu"),
         ("cuda", "disk", "GPU — offload=disk"),
     ]
     x_labels_b = [c[2] for c in gpu_configs] + ["CPU"]
@@ -404,8 +487,8 @@ def build_fig3_offload(df: pd.DataFrame) -> go.Figure:
     sub_c = sub_c[(sub_c[NB_TRAIN_SAMPLES] == 4000) & (sub_c[NB_ESTIMATORS] == 4)]
 
     gpu_only_configs = [
-        ("cuda", "gpu",  "GPU — offload=gpu"),
-        ("cuda", "cpu",  "GPU — offload=cpu"),
+        ("cuda", "gpu", "GPU — offload=gpu"),
+        ("cuda", "cpu", "GPU — offload=cpu"),
         ("cuda", "disk", "GPU — offload=disk"),
     ]
     x_labels_c = [c[2] for c in gpu_only_configs]
@@ -414,10 +497,10 @@ def build_fig3_offload(df: pd.DataFrame) -> go.Figure:
         rows=1,
         cols=2,
         subplot_titles=[
-            "n_test=200  (GPU vs CPU, n_train=4000)",
-            "n_test=10 000  (GPU only, n_train=4000)",
+            "n_test=200<br>(GPU vs CPU, n_train=4000)",
+            "n_test=10 000<br>(GPU only, n_train=4000)",
         ],
-        horizontal_spacing=0.12,
+        horizontal_spacing=_hspacing("fig3", gallery),
     )
 
     # --- Left panel: predict time + memory (3 traces) ---
@@ -434,11 +517,12 @@ def build_fig3_offload(df: pd.DataFrame) -> go.Figure:
             name="Predict time",
             legendgroup="time",
             showlegend=True,
-            marker_color=COLOR_CACHE_OFF,
+            marker_color=COLOR_BAR_TIME,
             marker_line=dict(width=1, color="#1f2937"),
             hovertemplate="%{x}<br>predict=%{y:.3g} s<extra></extra>",
         ),
-        row=1, col=1,
+        row=1,
+        col=1,
     )
     # RAM
     ys_ram_b = []
@@ -453,11 +537,12 @@ def build_fig3_offload(df: pd.DataFrame) -> go.Figure:
             name="RAM peak",
             legendgroup="ram",
             showlegend=True,
-            marker_color="#2563eb",
+            marker_color=COLOR_BAR_RAM,
             marker_line=dict(width=1, color="#1f2937"),
             hovertemplate="%{x}<br>RAM=%{y:.0f} MB<extra></extra>",
         ),
-        row=1, col=1,
+        row=1,
+        col=1,
     )
     # VRAM
     ys_vram_b = []
@@ -472,11 +557,12 @@ def build_fig3_offload(df: pd.DataFrame) -> go.Figure:
             name="VRAM peak",
             legendgroup="vram",
             showlegend=True,
-            marker_color="#dc2626",
+            marker_color=COLOR_BAR_VRAM,
             marker_line=dict(width=1, color="#1f2937"),
             hovertemplate="%{x}<br>VRAM=%{y:.0f} MB<extra></extra>",
         ),
-        row=1, col=1,
+        row=1,
+        col=1,
     )
 
     # --- Right panel: predict time + memory (3 traces, GPU only) ---
@@ -492,11 +578,12 @@ def build_fig3_offload(df: pd.DataFrame) -> go.Figure:
             name="Predict time",
             legendgroup="time",
             showlegend=False,
-            marker_color=COLOR_CACHE_OFF,
+            marker_color=COLOR_BAR_TIME,
             marker_line=dict(width=1, color="#1f2937"),
             hovertemplate="%{x}<br>predict=%{y:.3g} s<extra></extra>",
         ),
-        row=1, col=2,
+        row=1,
+        col=2,
     )
     # RAM
     ys_ram_c = []
@@ -510,11 +597,12 @@ def build_fig3_offload(df: pd.DataFrame) -> go.Figure:
             name="RAM peak",
             legendgroup="ram",
             showlegend=False,
-            marker_color="#2563eb",
+            marker_color=COLOR_BAR_RAM,
             marker_line=dict(width=1, color="#1f2937"),
             hovertemplate="%{x}<br>RAM=%{y:.0f} MB<extra></extra>",
         ),
-        row=1, col=2,
+        row=1,
+        col=2,
     )
     # VRAM
     ys_vram_c = []
@@ -528,11 +616,12 @@ def build_fig3_offload(df: pd.DataFrame) -> go.Figure:
             name="VRAM peak",
             legendgroup="vram",
             showlegend=False,
-            marker_color="#dc2626",
+            marker_color=COLOR_BAR_VRAM,
             marker_line=dict(width=1, color="#1f2937"),
             hovertemplate="%{x}<br>VRAM=%{y:.0f} MB<extra></extra>",
         ),
-        row=1, col=2,
+        row=1,
+        col=2,
     )
 
     for c in (1, 2):
@@ -542,13 +631,19 @@ def build_fig3_offload(df: pd.DataFrame) -> go.Figure:
 
     _finalize(
         fig,
-        title="Figure 3 — Offload comparison: GPU vs CPU (left) and large n_test (right)",
-        subtitle="Classification, 10 classes, n_estimators=4, kv_cache=False, n_features=200, n_train=4000. "
-                 "Left: n_test=200, GPU vs CPU (offload no-op on CPU). "
-                 "Right: n_test=10 000, GPU only — large output tensors make offload modes save ~2.5 GB VRAM. "
-                 "Bars: predict time (gray), RAM (blue), VRAM (crimson). Log y.",
+        title=(
+            "Figure 3 — Offload comparison: GPU vs CPU (left) and large n_test (right)"
+        ),
+        subtitle="Classification, 10 classes, n_estimators=4, "
+        "kv_cache=False, n_features=200, n_train=4000.<br>"
+        "Left: n_test=200, GPU vs CPU (offload no-op on CPU).<br>"
+        "Right: n_test=10 000, GPU only — large output tensors make "
+        "offload modes save ~2.5 GB VRAM.<br>"
+        "Bars: predict time (black), RAM (blue), VRAM (vermillion). Log y.",
         height=560,
         legend_title="Metric",
+        gallery=gallery,
+        extra_bottom=60,
     )
     return fig
 
@@ -557,42 +652,117 @@ def build_fig3_offload(df: pd.DataFrame) -> go.Figure:
 # Shared layout helper
 # ---------------------------------------------------------------------------
 
-def _finalize(fig: go.Figure, title: str, subtitle: str, height: int, legend_title: str) -> None:
-    fig.update_layout(
-        title=dict(
-            text=f"<b>{title}</b><br><span style='font-size:13px;color:#6b7280'>{subtitle}</span>",
-            font_size=18,
+
+def _finalize(
+    fig: go.Figure,
+    title: str,
+    subtitle: str,
+    height: int,
+    legend_title: str,
+    gallery: bool = False,
+    extra_bottom: int = 0,
+) -> None:
+    # Keep the plot area IDENTICAL to the HEAD baseline (240 px tall) so the
+    # plot proportions never change. The figure title block (bold title +
+    # ``<br>``-wrapped subtitle) is rendered as a *layout annotation* pinned
+    # at the top of the margin band with ``yanchor="top"`` (grows down),
+    # because plotly's ``layout.title`` is capped at y=1 (the domain top) and
+    # a multi-line block would grow down from there into the subplot titles.
+    #
+    # The top margin must hold: the figure title block + a gap + the subplot
+    # titles (which grow up from y=1). A 4-line subtitle needs more band than
+    # a 2-line one, so ``t`` scales with the subtitle line count. To keep the
+    # plot area fixed at 240 px while ``t`` changes, ``height`` is adjusted by
+    # the same delta (height = 240 + t + b). So:
+    #   - 2-line subtitle -> smaller t, smaller total height (less gap).
+    #   - 4-line subtitle -> larger t, larger total height (more gap).
+    #
+    # Horizontal margins and y-axis title standoff depend on the target:
+    # ``gallery`` tightens them for the narrow sphinx-gallery column, while
+    # the default profile uses generous margins for direct/standalone viewing.
+    n_subtitle_lines = subtitle.count("<br>") + 1
+    # Per-line budgets tuned to plotly's actual rendered text metrics (font
+    # 18 bold title ~30px/line, 13px subtitle ~22px/line, two-line subplot
+    # title at font 14 ~48px). The gap between the title block and the subplot
+    # titles scales up slightly with the subtitle line count so 4-row
+    # subtitles get a bit more breathing room than 2-row ones.
+    title_block_px = 30 + n_subtitle_lines * 22
+    subplot_title_px = 48
+    gap_px = 16 + n_subtitle_lines * 2
+    # Bottom margin + legend position depend on the target. In gallery mode
+    # the legend is pushed to the very bottom of a minimal bottom margin
+    # (anchored at the bottom, growing up) so it sits well below the x-axis
+    # titles; in default mode the legend stays at a comfortable mid-band
+    # position with a generous bottom margin.
+    if gallery:
+        bottom_margin = 90 + extra_bottom
+        legend_y = -0.35 - extra_bottom / 240.0
+        legend_yanchor = "bottom"
+    else:
+        bottom_margin = 160 + extra_bottom
+        legend_y = -0.22 - extra_bottom / 240.0
+        legend_yanchor = "top"
+    plot_area_px = 240  # fixed: identical to the HEAD baseline
+    top_margin = title_block_px + gap_px + subplot_title_px
+    height = plot_area_px + top_margin + bottom_margin
+    band_top = 1 + top_margin / plot_area_px  # paper y of the figure's top edge
+    left_margin, right_margin = _GALLERY_LR if gallery else _DEFAULT_LR
+    y_standoff = _GALLERY_YSTANDOFF if gallery else _DEFAULT_YSTANDOFF
+    # Capture the existing (subplot-title) annotations BEFORE adding the
+    # figure-title annotation, so the baseline-positioning loop below only
+    # touches the subplot titles, not the figure title.
+    n_subplot_anns = len(fig.layout.annotations)
+    # Render the figure title block as an annotation pinned at the band top.
+    fig.add_annotation(
+        text=(
+            f"<b>{title}</b><br>"
+            f"<span style='font-size:13px;color:#6b7280'>{subtitle}</span>"
         ),
+        x=0.5,
+        xref="paper",
+        y=band_top,
+        yref="paper",
+        yanchor="top",
+        xanchor="center",
+        showarrow=False,
+        font=dict(size=18),
+    )
+    fig.update_layout(
+        # layout.title left empty: the figure title is the annotation above.
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
         hovermode="closest",
         legend=dict(
             title=dict(text=f"<b>{legend_title}</b>", font_size=13),
             orientation="h",
-            y=-0.22,
-            x=0,
+            y=legend_y,
+            yanchor=legend_yanchor,
+            x=0.5,
+            xanchor="center",
             font_size=12,
         ),
-        margin=dict(l=70, r=70, t=160, b=160),
+        margin=dict(l=left_margin, r=right_margin, t=top_margin, b=bottom_margin),
         height=height,
     )
-    # Lift subplot titles slightly above their default position so they
-    # breathe relative to the plot below. Using a relative offset (not a
-    # fixed paper-y) keeps multi-row layouts correct: each title stays
-    # above its own subplot instead of stacking at the top of the figure.
-    fig.for_each_annotation(
-        lambda a: a.update(
-            y=a.y + 0.03,
+    # Subplot titles: keep the baseline positioning (lifted +0.03, growing
+    # up). Do NOT reposition them — moving them changes the plot's apparent
+    # proportions. Only touch the pre-existing annotations (by index), not
+    # the figure-title annotation we just appended.
+    for i in range(n_subplot_anns):
+        fig.layout.annotations[i].update(
+            y=fig.layout.annotations[i].y + 0.03,
             yanchor="bottom",
             font=dict(size=14, color="#1f2937"),
         )
-    )
-    fig.update_yaxes(
+    yaxis_kwargs = dict(
         zeroline=False,
         gridcolor="rgba(0,0,0,0.10)",
         title_font=dict(size=13, color="#1f2937"),
         tickfont=dict(size=11, color="#374151"),
     )
+    if y_standoff is not None:
+        yaxis_kwargs["title_standoff"] = y_standoff
+    fig.update_yaxes(**yaxis_kwargs)
     fig.update_xaxes(
         zeroline=False,
         gridcolor="rgba(0,0,0,0.10)",
@@ -602,13 +772,135 @@ def _finalize(fig: go.Figure, title: str, subtitle: str, height: int, legend_tit
 
 
 # ---------------------------------------------------------------------------
+# Comparison: overlay a second dataset with a visibility toggle
+# ---------------------------------------------------------------------------
+
+
+def build_comparison_fig(
+    build_fn,
+    df_base: pd.DataFrame,
+    df_other: pd.DataFrame,
+    base_label: str = "baseline (2.2.0)",
+    other_label: str = "pr162",
+    gallery: bool = False,
+) -> go.Figure:
+    """Build a toggleable comparison figure from two datasets.
+
+    Builds a figure identical to ``build_fn(df_base)`` but with a second
+    dataset (``df_other``) overlaid as hidden traces and a toggle button to
+    switch between the two.
+
+    The two datasets must produce the same number of traces in the same
+    order (the builders add one trace per structural cell, so this holds as
+    long as the same figure is built from both). The toggle uses plotly
+    ``updatemenus`` ``restyle`` to flip the ``visible`` flag of each set.
+    """
+    fig = build_fn(df_base, gallery=gallery)
+    fig_other = build_fn(df_other, gallery=gallery)
+
+    n_base = len(fig.data)
+    n_other = len(fig_other.data)
+    if n_other != n_base:
+        raise ValueError(
+            f"{build_fn.__name__}: trace-count mismatch between datasets "
+            f"(base={n_base}, other={n_other}); the comparison grids must "
+            f"produce the same figure structure."
+        )
+
+    # Append the second dataset's traces, hidden by default. ``add_trace``
+    # deep-copies the trace, so mutating ``fig_other.data`` first is safe.
+    # Traces keep their ``xaxis``/``yaxis`` assignment, so they land in the
+    # correct subplots of ``fig``.
+    for tr in list(fig_other.data):
+        tr.update(visible=False)
+        fig.add_trace(tr)
+
+    n = n_base
+    visible_base = [True] * n + [False] * n
+    visible_other = [False] * n + [True] * n
+
+    fig.update_layout(
+        updatemenus=[
+            dict(
+                type="buttons",
+                direction="left",
+                showactive=True,
+                x=1.0,
+                xanchor="right",
+                y=-0.18,
+                yanchor="top",
+                bgcolor="rgba(0,0,0,0.04)",
+                bordercolor="#9ca3af",
+                font=dict(size=12, color="#1f2937"),
+                buttons=[
+                    dict(
+                        label=base_label,
+                        method="restyle",
+                        args=[{"visible": visible_base}],
+                    ),
+                    dict(
+                        label=other_label,
+                        method="restyle",
+                        args=[{"visible": visible_other}],
+                    ),
+                ],
+            )
+        ]
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
+    """Build and write the gallery figures (CLI entry point)."""
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--csv", default="results/results.csv", help="consolidated results CSV")
-    ap.add_argument("--out", default="display/gallery_figures", help="output dir for HTML")
+    ap.add_argument(
+        "--csv", default="results/results.csv", help="consolidated results CSV"
+    )
+    ap.add_argument(
+        "--compare-csv",
+        default=None,
+        help=(
+            "Second consolidated results CSV to overlay with a toggle. "
+            "When set, writes <name>_comparison_<suffix>.html for each "
+            "figure (the standalone figures are left untouched)."
+        ),
+    )
+    ap.add_argument(
+        "--compare-suffix",
+        default="pr162",
+        help="Suffix for the comparison output filenames (default: pr162).",
+    )
+    ap.add_argument(
+        "--compare-base-label",
+        default="baseline (2.2.0)",
+        help="Toggle button label for the --csv dataset.",
+    )
+    ap.add_argument(
+        "--compare-other-label",
+        default="pr162",
+        help="Toggle button label for the --compare-csv dataset.",
+    )
+    ap.add_argument(
+        "--out", default="display/gallery_figures", help="output dir for HTML/embed"
+    )
+    ap.add_argument(
+        "--gallery-html",
+        action="store_true",
+        help=(
+            "Write gallery-tuned HTML embed snippets (<out>/embed/<name>.html) "
+            "with tight margins for the narrow sphinx-gallery column, for "
+            "inlining into a sphinx page via ``.. raw:: html :file:``. Uses "
+            "fig.to_html(full_html=False, include_plotlyjs='cdn') so the "
+            "snippet is a self-contained <div>+<script> block. "
+            "Standalone/standalone-comparison HTML (the default and "
+            "--compare-csv modes) always uses the default (generous) margins."
+        ),
+    )
     args = ap.parse_args()
 
     df = load_results(args.csv)
@@ -620,11 +912,39 @@ def main() -> None:
         "fig2_memory": build_fig2_vram,
         "fig3_offload": build_fig3_offload,
     }
-    for name, fn in builders.items():
-        fig = fn(df)
-        path = out / f"{name}.html"
-        fig.write_html(path, include_plotlyjs="cdn")
-        print(f"wrote {path}")
+
+    if args.gallery_html:
+        # Gallery-tuned HTML embed snippets for inlining into a sphinx page
+        # via ``.. raw:: html :file:``. Tight margins for the narrow gallery
+        # column; self-contained <div>+<script> with the plotly CDN.
+        embed_dir = out / "embed"
+        embed_dir.mkdir(parents=True, exist_ok=True)
+        for name, fn in builders.items():
+            fig = fn(df, gallery=True)
+            path = embed_dir / f"{name}.html"
+            path.write_text(fig.to_html(full_html=False, include_plotlyjs="cdn"))
+            print(f"wrote {path}")
+    elif args.compare_csv is None:
+        # Standalone HTML with default (generous) margins.
+        for name, fn in builders.items():
+            fig = fn(df)
+            path = out / f"{name}.html"
+            fig.write_html(path, include_plotlyjs="cdn")
+            print(f"wrote {path}")
+    else:
+        # Comparison HTML with default (generous) margins.
+        df_other = load_results(args.compare_csv)
+        for name, fn in builders.items():
+            fig = build_comparison_fig(
+                fn,
+                df,
+                df_other,
+                base_label=args.compare_base_label,
+                other_label=args.compare_other_label,
+            )
+            path = out / f"{name}_comparison_{args.compare_suffix}.html"
+            fig.write_html(path, include_plotlyjs="cdn")
+            print(f"wrote {path}")
 
 
 if __name__ == "__main__":

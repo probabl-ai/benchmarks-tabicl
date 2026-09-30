@@ -125,6 +125,21 @@ Notes:
 - Command C is GPU-only at large `n_test` so the output tensor pressures
   VRAM and the offload modes show measurable VRAM savings.
 
+### `display/gallery_figures.py` — gallery figures
+
+Builds the three Plotly figures (KV cache timing, KV cache VRAM, offload
+comparison) from a consolidated `results.csv`:
+
+```bash
+python display/gallery_figures.py --csv results/results.csv \
+    --out display/gallery_figures
+# -> display/gallery_figures/fig{1,2,3}_*.html
+```
+
+The figures are embedded into the TabICL sphinx-gallery page; see the
+script's `--help` for the comparison (`--compare-csv`) and gallery-embed
+(`--gallery-html`) modes.
+
 ## Results
 
 Results land in `outputs/` as `benchopt_run_<timestamp>.parquet` plus an HTML
