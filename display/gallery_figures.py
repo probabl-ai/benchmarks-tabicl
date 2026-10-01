@@ -85,7 +85,7 @@ MARKER_CPU_DISK = "triangle-down"
 # fixed at 240 px tall in both, so vertical proportions never change.
 # ---------------------------------------------------------------------------
 _DEFAULT_LR = (80, 80)  # generous left/right for standalone viewing
-_GALLERY_LR = (20, 0)  # tight for the narrow gallery column
+_GALLERY_LR = (20, 5)  # tight for the narrow gallery column
 _DEFAULT_YSTANDOFF = None  # plotly default
 _GALLERY_YSTANDOFF = 6
 
@@ -182,7 +182,9 @@ def _agg(df: pd.DataFrame, by: list[str], metric: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def build_fig1_kv_cache(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
+def build_fig1_kv_cache(
+    df: pd.DataFrame, gallery: bool = False, mobile: bool = False
+) -> go.Figure:
     """Predict and fit+predict time vs dataset size (3 axes), KV cache OFF vs ON.
 
     Layout: 1 row × 3 cols. Each cell plots four lines:
@@ -228,12 +230,20 @@ def build_fig1_kv_cache(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
         ),
     ]
 
-    fig = make_subplots(
-        rows=1,
-        cols=3,
-        subplot_titles=[title for _, _, _, _, title in rows_spec],
-        horizontal_spacing=_hspacing("fig12", gallery),
-    )
+    if mobile:
+        fig = make_subplots(
+            rows=3,
+            cols=1,
+            subplot_titles=[title for _, _, _, _, title in rows_spec],
+            vertical_spacing=0.18,
+        )
+    else:
+        fig = make_subplots(
+            rows=1,
+            cols=3,
+            subplot_titles=[title for _, _, _, _, title in rows_spec],
+            horizontal_spacing=_hspacing("fig12", gallery),
+        )
 
     # (kv value, color, marker, kv_name)
     kv_settings = [
@@ -252,6 +262,7 @@ def build_fig1_kv_cache(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
         for k, v in filt.items():
             cell = cell[cell[k] == v]
 
+        r, c = (col_idx, 1) if mobile else (1, col_idx)
         for kv, color, marker, kv_name in kv_settings:
             d = cell[cell[KV_CACHE] == kv].sort_values(x_col)
             for metric, dash, lw, metric_name in metrics:
@@ -270,12 +281,12 @@ def build_fig1_kv_cache(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
                             f"<extra>kv {kv_name}</extra>"
                         ),
                     ),
-                    row=1,
-                    col=col_idx,
+                    row=r,
+                    col=c,
                 )
 
-        fig.update_xaxes(type="log", title_text=x_title, row=1, col=col_idx)
-        fig.update_yaxes(type="log", row=1, col=col_idx)
+        fig.update_xaxes(type="log", title_text=x_title, row=r, col=c)
+        fig.update_yaxes(type="log", row=r, col=c)
 
     fig.update_yaxes(title_text="Time (s)", row=1, col=1)
 
@@ -289,6 +300,8 @@ def build_fig1_kv_cache(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
         height=560,
         legend_title="KV cache × metric",
         gallery=gallery,
+        plot_area_px=600 if mobile else 240,
+        mobile=mobile,
     )
     return fig
 
@@ -298,7 +311,9 @@ def build_fig1_kv_cache(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
 # ---------------------------------------------------------------------------
 
 
-def build_fig2_vram(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
+def build_fig2_vram(
+    df: pd.DataFrame, gallery: bool = False, mobile: bool = False
+) -> go.Figure:
     """Peak VRAM vs three dataset-size axes, KV cache OFF vs ON.
 
     Layout: 1 row × 3 cols. Each cell plots three lines:
@@ -359,12 +374,20 @@ def build_fig2_vram(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
         ),
     ]
 
-    fig = make_subplots(
-        rows=1,
-        cols=3,
-        subplot_titles=[title for _, _, _, _, title in rows_spec],
-        horizontal_spacing=_hspacing("fig12", gallery),
-    )
+    if mobile:
+        fig = make_subplots(
+            rows=3,
+            cols=1,
+            subplot_titles=[title for _, _, _, _, title in rows_spec],
+            vertical_spacing=0.18,
+        )
+    else:
+        fig = make_subplots(
+            rows=1,
+            cols=3,
+            subplot_titles=[title for _, _, _, _, title in rows_spec],
+            horizontal_spacing=_hspacing("fig12", gallery),
+        )
 
     # Per-kv metric sets. ``kv OFF — fit`` is omitted: it is constant at
     # ~110 MB across all axes (the estimator's small footprint, no kv cache
@@ -397,6 +420,7 @@ def build_fig2_vram(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
         for k, v in filt.items():
             cell = cell[cell[k] == v]
 
+        r, c = (col_idx, 1) if mobile else (1, col_idx)
         for kv, color, marker, kv_name, metrics in kv_metrics:
             d = cell[cell[KV_CACHE] == kv].sort_values(x_col)
             for metric, dash, lw, metric_name in metrics:
@@ -415,12 +439,12 @@ def build_fig2_vram(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
                             f"<extra>kv {kv_name}</extra>"
                         ),
                     ),
-                    row=1,
-                    col=col_idx,
+                    row=r,
+                    col=c,
                 )
 
-        fig.update_xaxes(type="log", title_text=x_title, row=1, col=col_idx)
-        fig.update_yaxes(type="log", row=1, col=col_idx)
+        fig.update_xaxes(type="log", title_text=x_title, row=r, col=c)
+        fig.update_yaxes(type="log", row=r, col=c)
 
     fig.update_yaxes(title_text="VRAM peak (MB)", row=1, col=1)
 
@@ -436,6 +460,8 @@ def build_fig2_vram(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
         height=560,
         legend_title="KV cache × phase",
         gallery=gallery,
+        plot_area_px=600 if mobile else 240,
+        mobile=mobile,
     )
     return fig
 
@@ -445,7 +471,9 @@ def build_fig2_vram(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
 # ---------------------------------------------------------------------------
 
 
-def build_fig3_offload(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
+def build_fig3_offload(
+    df: pd.DataFrame, gallery: bool = False, mobile: bool = False
+) -> go.Figure:
     """Offload comparison: GPU vs CPU (left) and GPU offload at large n_test (right).
 
     Layout: 1 row × 2 cols.
@@ -493,15 +521,26 @@ def build_fig3_offload(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
     ]
     x_labels_c = [c[2] for c in gpu_only_configs]
 
-    fig = make_subplots(
-        rows=1,
-        cols=2,
-        subplot_titles=[
-            "n_test=200<br>(GPU vs CPU, n_train=4000)",
-            "n_test=10 000<br>(GPU only, n_train=4000)",
-        ],
-        horizontal_spacing=_hspacing("fig3", gallery),
-    )
+    if mobile:
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            subplot_titles=[
+                "n_test=200<br>(GPU vs CPU, n_train=4000)",
+                "n_test=10 000<br>(GPU only, n_train=4000)",
+            ],
+            vertical_spacing=0.36,
+        )
+    else:
+        fig = make_subplots(
+            rows=1,
+            cols=2,
+            subplot_titles=[
+                "n_test=200<br>(GPU vs CPU, n_train=4000)",
+                "n_test=10 000<br>(GPU only, n_train=4000)",
+            ],
+            horizontal_spacing=_hspacing("fig3", gallery),
+        )
 
     # --- Left panel: predict time + memory (3 traces) ---
     # Predict time
@@ -566,6 +605,7 @@ def build_fig3_offload(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
     )
 
     # --- Right panel: predict time + memory (3 traces, GPU only) ---
+    r2, c2 = (2, 1) if mobile else (1, 2)
     # Predict time
     ys_time_c = []
     for device, offload, _ in gpu_only_configs:
@@ -582,8 +622,8 @@ def build_fig3_offload(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
             marker_line=dict(width=1, color="#1f2937"),
             hovertemplate="%{x}<br>predict=%{y:.3g} s<extra></extra>",
         ),
-        row=1,
-        col=2,
+        row=r2,
+        col=c2,
     )
     # RAM
     ys_ram_c = []
@@ -601,8 +641,8 @@ def build_fig3_offload(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
             marker_line=dict(width=1, color="#1f2937"),
             hovertemplate="%{x}<br>RAM=%{y:.0f} MB<extra></extra>",
         ),
-        row=1,
-        col=2,
+        row=r2,
+        col=c2,
     )
     # VRAM
     ys_vram_c = []
@@ -620,13 +660,18 @@ def build_fig3_offload(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
             marker_line=dict(width=1, color="#1f2937"),
             hovertemplate="%{x}<br>VRAM=%{y:.0f} MB<extra></extra>",
         ),
-        row=1,
-        col=2,
+        row=r2,
+        col=c2,
     )
 
-    for c in (1, 2):
-        fig.update_xaxes(title_text="Device × offload mode", row=1, col=c)
-        fig.update_yaxes(type="log", row=1, col=c)
+    if mobile:
+        for r in (1, 2):
+            fig.update_xaxes(title_text="Device × offload mode", row=r, col=1)
+            fig.update_yaxes(type="log", row=r, col=1)
+    else:
+        for c in (1, 2):
+            fig.update_xaxes(title_text="Device × offload mode", row=1, col=c)
+            fig.update_yaxes(type="log", row=1, col=c)
     fig.update_yaxes(title_text="Predict time (s) / Memory (MB)", row=1, col=1)
 
     _finalize(
@@ -644,6 +689,9 @@ def build_fig3_offload(df: pd.DataFrame, gallery: bool = False) -> go.Figure:
         legend_title="Metric",
         gallery=gallery,
         extra_bottom=60,
+        plot_area_px=400 if mobile else 240,
+        mobile=mobile,
+        legend_offset_px=68 if mobile else None,
     )
     return fig
 
@@ -661,6 +709,9 @@ def _finalize(
     legend_title: str,
     gallery: bool = False,
     extra_bottom: int = 0,
+    plot_area_px: int = 240,
+    mobile: bool = False,
+    legend_offset_px: int | None = None,
 ) -> None:
     # Keep the plot area IDENTICAL to the HEAD baseline (240 px tall) so the
     # plot proportions never change. The figure title block (bold title +
@@ -690,19 +741,32 @@ def _finalize(
     subplot_title_px = 48
     gap_px = 16 + n_subtitle_lines * 2
     # Bottom margin + legend position depend on the target. In gallery mode
-    # the legend is pushed to the very bottom of a minimal bottom margin
-    # (anchored at the bottom, growing up) so it sits well below the x-axis
-    # titles; in default mode the legend stays at a comfortable mid-band
-    # position with a generous bottom margin.
+    # the legend sits just below the plot and grows *downward* into the
+    # bottom margin (anchored at top). This way, when the legend wraps to
+    # multiple lines on a narrow screen, the extra lines grow down into the
+    # margin (harmless) instead of up into the plot. In default mode the
+    # legend stays at a comfortable mid-band position with a generous bottom
+    # margin.
     if gallery:
         bottom_margin = 90 + extra_bottom
-        legend_y = -0.35 - extra_bottom / 240.0
-        legend_yanchor = "bottom"
+        # Legend sits a fixed *pixel* offset below the plot domain (just past
+        # the x-axis tick labels + title), converted to paper coords via the
+        # plot area height. This keeps the pixel gap consistent across
+        # desktop (plot_area 240) and mobile (400-600), and pushes lower for
+        # fig3 whose diagonal tick labels need ``extra_bottom`` of room.
+        # ``legend_offset_px`` overrides the computed offset (used by fig3
+        # mobile, where the default 45+extra_bottom sits too far below the
+        # last subplot's x-axis title).
+        legend_offset = (
+            legend_offset_px if legend_offset_px is not None else 45 + extra_bottom
+        )
+        legend_y = -legend_offset / plot_area_px
+        legend_yanchor = "top"
     else:
         bottom_margin = 160 + extra_bottom
         legend_y = -0.22 - extra_bottom / 240.0
         legend_yanchor = "top"
-    plot_area_px = 240  # fixed: identical to the HEAD baseline
+    plot_area_px = plot_area_px  # fixed per call (240 desktop, more for mobile stacks)
     top_margin = title_block_px + gap_px + subplot_title_px
     height = plot_area_px + top_margin + bottom_margin
     band_top = 1 + top_margin / plot_area_px  # paper y of the figure's top edge
@@ -752,7 +816,7 @@ def _finalize(
         fig.layout.annotations[i].update(
             y=fig.layout.annotations[i].y + 0.03,
             yanchor="bottom",
-            font=dict(size=14, color="#1f2937"),
+            font=dict(size=12, color="#1f2937"),
         )
     yaxis_kwargs = dict(
         zeroline=False,
@@ -783,6 +847,7 @@ def build_comparison_fig(
     base_label: str = "baseline (2.2.0)",
     other_label: str = "pr162",
     gallery: bool = False,
+    mobile: bool = False,
 ) -> go.Figure:
     """Build a toggleable comparison figure from two datasets.
 
@@ -795,8 +860,8 @@ def build_comparison_fig(
     long as the same figure is built from both). The toggle uses plotly
     ``updatemenus`` ``restyle`` to flip the ``visible`` flag of each set.
     """
-    fig = build_fn(df_base, gallery=gallery)
-    fig_other = build_fn(df_other, gallery=gallery)
+    fig = build_fn(df_base, gallery=gallery, mobile=mobile)
+    fig_other = build_fn(df_other, gallery=gallery, mobile=mobile)
 
     n_base = len(fig.data)
     n_other = len(fig_other.data)
@@ -831,7 +896,7 @@ def build_comparison_fig(
                 yanchor="top",
                 bgcolor="rgba(0,0,0,0.04)",
                 bordercolor="#9ca3af",
-                font=dict(size=12, color="#1f2937"),
+                font=dict(size=14, color="#1f2937"),
                 buttons=[
                     dict(
                         label=base_label,
@@ -915,14 +980,27 @@ def main() -> None:
 
     if args.gallery_html:
         # Gallery-tuned HTML embed snippets for inlining into a sphinx page
-        # via ``.. raw:: html :file:``. Tight margins for the narrow gallery
-        # column; self-contained <div>+<script> with the plotly CDN.
+        # via ``.. raw:: html :file:``. Each file contains BOTH a desktop
+        # layout (1 row x N cols) and a mobile layout (N rows x 1 col),
+        # wrapped in ``.plotly-desktop`` / ``.plotly-mobile`` divs so the
+        # docs CSS can swap them by viewport width. Tight margins for the
+        # narrow gallery column; plotly loaded from the CDN (once, in the
+        # desktop snippet — the mobile snippet reuses it).
         embed_dir = out / "embed"
         embed_dir.mkdir(parents=True, exist_ok=True)
         for name, fn in builders.items():
-            fig = fn(df, gallery=True)
+            desktop = fn(df, gallery=True, mobile=False)
+            mobile_fig = fn(df, gallery=True, mobile=True)
+            html = (
+                '<div class="plotly-desktop">\n'
+                + desktop.to_html(full_html=False, include_plotlyjs="cdn")
+                + "\n</div>\n"
+                '<div class="plotly-mobile">\n'
+                + mobile_fig.to_html(full_html=False, include_plotlyjs=False)
+                + "\n</div>\n"
+            )
             path = embed_dir / f"{name}.html"
-            path.write_text(fig.to_html(full_html=False, include_plotlyjs="cdn"))
+            path.write_text(html)
             print(f"wrote {path}")
     elif args.compare_csv is None:
         # Standalone HTML with default (generous) margins.
