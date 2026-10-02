@@ -827,6 +827,12 @@ def _finalize(
     if y_standoff is not None:
         yaxis_kwargs["title_standoff"] = y_standoff
     fig.update_yaxes(**yaxis_kwargs)
+    # Link all subplot y-axes to the first (shared y scale across subplots):
+    # matched axes autorange to the union of their data, so every subplot
+    # uses the same vertical scale and zooms together.
+    for ax_key in fig.layout.to_plotly_json():
+        if ax_key.startswith("yaxis") and ax_key != "yaxis":
+            getattr(fig.layout, ax_key).matches = "y"
     fig.update_xaxes(
         zeroline=False,
         gridcolor="rgba(0,0,0,0.10)",
