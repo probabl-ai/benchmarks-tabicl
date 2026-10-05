@@ -23,6 +23,18 @@ as the headline aggregate peak.
 ``fit_time`` and ``predict_time`` are always reported separately as objective
 metrics. The per-phase peaks (``ram_peak_fit_mb``, ``vram_peak_predict_mb``,
 ``vram_peak_fit_mb``, ``vram_peak_predict_mb``) are also reported.
+
+In addition to the per-window peaks, ``run`` records a series of point-in-time
+memory quantities — current RAM and VRAM, as deltas from the run-start
+baseline — at five stages: after building the estimator (before fit), right
+after fit, after a post-fit cleanup, after predict, and after a post-predict
+cleanup. These are stored in ``self.ressources`` to observe how the
+cache-related VRAM (the kv cache) allocated by torch evolves across the run.
+``predict_abs`` (the predict-phase absolute footprint) is now built on the
+post-fit-cleanup memory quantity minus the pre-fit one (to stay on the
+pre-fit-relative scale of the fit peak) rather than the fit tracker's
+end-of-window usage, so the resident fit state is measured after transient
+fit allocations are released.
 """
 
 import shutil
@@ -30,6 +42,7 @@ import tempfile
 import time
 from pathlib import Path
 
+import psutil
 import tabicl
 from benchopt import BaseSolver
 
@@ -42,10 +55,19 @@ from benchmark_utils.memory_tracking import (
     ResourceTracker,
     cleanup_before_run,
     get_gpu_info,
+    measure_memory_quantities,
 )
 
 # Verified once at import; the same default applies to both estimators.
 _DEFAULT_BATCH_SIZE = check_default_batch_size(tabicl.TabICLClassifier)
+
+
+def _memory_quantities_delta(now, baseline):
+    """Subtract a baseline memory-quantity snapshot from a current one (per-key)."""
+    return {
+        "ram_mb": now["ram_mb"] - baseline["ram_mb"],
+        "vram_mb": now["vram_mb"] - baseline["vram_mb"],
+    }
 
 
 class BaseTabICLSolver(BaseSolver):
@@ -197,31 +219,26 @@ class BaseTabICLSolver(BaseSolver):
         return y_pred, None, None
 
     def warm_up(self):
-        """Untimed fit + predict on a tiny dummy slice to trigger CUDA kernel /
-        cuDNN / FA3 JIT autotuning. ``run`` builds its own fresh estimator, so
-        this one is discarded.
-        """
-        import gc
+        """Untimed fit + predict on a real-data slice for CUDA/cuDNN/FA3 autotuning.
 
+        Takes the first 100 rows of the (shuffled) training set so the warm-up
+        exercises the real feature distribution; the estimator built here is
+        discarded — ``run`` builds its own fresh one.
+
+        Warming up deliberately does *not* clean up afterwards: emptying the
+        allocator cache would undo the warm-up, so the cache is left warm for
+        the timed run (``run`` cleans its own baseline before measuring).
+        """
         import numpy as np
 
         est = self._build_estimator()
-        n_feat = self.X_train.shape[1]
+        n_warmup = min(100, self.X_train.shape[0])
         rng = np.random.default_rng(0)
-        X_fit = rng.standard_normal((2, n_feat))
-        X_pred = rng.standard_normal((2, n_feat))
-        if self.task == "classification":
-            y_fit = np.zeros(2, dtype=self.y_train.dtype)
-        else:
-            y_fit = np.zeros(2, dtype=self.y_train.dtype)
+        perm = rng.permutation(self.X_train.shape[0])[:n_warmup]
+        X_fit = self.X_train[perm]
+        y_fit = self.y_train[perm]
         est.fit(X_fit, y_fit)
-        if self.needs_proba:
-            est.predict_proba(X_pred)
-        else:
-            est.predict(X_pred)
-        del est
-        gc.collect()
-        cleanup_before_run(self.device)
+        est.predict(X_fit)
 
     # --- timed run --------------------------------------------------------
 
@@ -230,39 +247,87 @@ class BaseTabICLSolver(BaseSolver):
         # prior runs (gc + empty_cache on the matching accelerator backend).
         cleanup_before_run(self.device)
 
+        # One psutil.Process handle reused for every memory-quantity snapshot
+        # (and the fit/predict ResourceTrackers) in this run, so the resident
+        # memory reads all come from the same process handle.
+        proc = psutil.Process()
+
+        # Point-in-time memory baseline (absolute) for the run. Every memory
+        # quantity below is a delta from this baseline so the constant process
+        # footprint (interpreter, loaded libraries, the checkpoint) is
+        # subtracted out and the memory quantities isolate the cache-related
+        # allocations we want to observe.
+        baseline = measure_memory_quantities(proc, self.device)
+
         self.estimator = self._build_estimator()
 
+        # Memory quantity: before fit, after building the estimator (construction cost).
+        self.memory_quantities_before_fit = _memory_quantities_delta(
+            measure_memory_quantities(proc, self.device), baseline
+        )
+
         # Fit window: tracker covers the fit (incl. kv_cache build) only.
-        self._tracker_fit = ResourceTracker()
+        self._tracker_fit = ResourceTracker(proc=proc)
         self._tracker_fit.start()
         t0 = time.perf_counter()
         self.estimator.fit(self.X_train, self.y_train)
         t1 = time.perf_counter()
         self.resources_fit = self._tracker_fit.stop()
 
-        # Predict window: fresh tracker, baseline is the post-fit state so
-        # the peak reflects only the incremental predict allocations.
-        self._tracker_predict = ResourceTracker()
+        # Memory quantity: right after fit (fit + kv_cache resident).
+        self.memory_quantities_after_fit = _memory_quantities_delta(
+            measure_memory_quantities(proc, self.device), baseline
+        )
+
+        # Cleanup after fit: release transient fit allocations (gc +
+        # empty_cache) so the next memory quantity reflects only what is *retained* (the
+        # fitted estimator + the kv cache, which stay allocated as live
+        # tensors and are not reclaimed by empty_cache).
+        cleanup_before_run(self.device)
+        self.memory_quantities_after_fit_cleanup = _memory_quantities_delta(
+            measure_memory_quantities(proc, self.device), baseline
+        )
+
+        # Predict window: fresh tracker, baseline is the post-fit-cleanup
+        # state so the peak reflects only the incremental predict allocations.
+        self._tracker_predict = ResourceTracker(proc=proc)
         self._tracker_predict.start()
         self.y_pred, self.y_score, self.y_encoder = self._predict(self.X_test)
         t2 = time.perf_counter()
         self.resources_predict = self._tracker_predict.stop()
 
+        # Memory quantity: after predict (predictions + any predict-side allocations).
+        self.memory_quantities_after_predict = _memory_quantities_delta(
+            measure_memory_quantities(proc, self.device), baseline
+        )
+
+        # Final cleanup and last memory quantity.
+        cleanup_before_run(self.device)
+        self.memory_quantities_after_predict_cleanup = _memory_quantities_delta(
+            measure_memory_quantities(proc, self.device), baseline
+        )
+
         self.fit_time = t1 - t0
         self.predict_time = t2 - t1
 
-        # Predict-phase footprint accounting for the resident fit state (e.g.
-        # the kv cache, the fitted estimator) that persists into predict: the
-        # predict window's baseline is the post-fit state, so its peak is only
-        # the *incremental* predict allocations. Adding the fit window's
-        # end-of-window usage (the retained fit state) gives the absolute
-        # footprint during predict — closer to a real inference workload.
+        # Predict-phase absolute footprint: the resident fit state (what fit
+        # added that survives the post-fit cleanup — the kv cache + fitted
+        # estimator state) plus the predict window's incremental peak. Built
+        # on the new memory quantities instead of the fit tracker's
+        # end-of-window usage: the resident state is measured after the
+        # post-fit cleanup releases transient fit allocations, so only the
+        # live kv cache + estimator remain — closer to a real inference
+        # workload. The pre-fit memory quantity
+        # (construction cost) is subtracted so this stays on the same
+        # pre-fit-relative scale as the fit peak (and as the old ram_end_mb).
         ram_predict_abs = (
-            self.resources_fit["ram_end_mb"]
+            self.memory_quantities_after_fit_cleanup["ram_mb"]
+            - self.memory_quantities_before_fit["ram_mb"]
             + self.resources_predict["ram_peak_mb"]
         )
         vram_predict_abs = (
-            self.resources_fit["vram_end_mb"]
+            self.memory_quantities_after_fit_cleanup["vram_mb"]
+            - self.memory_quantities_before_fit["vram_mb"]
             + self.resources_predict["vram_peak_mb"]
         )
 
@@ -276,6 +341,21 @@ class BaseTabICLSolver(BaseSolver):
             "ram_peak_predict_mb": ram_predict_abs,
             "vram_peak_predict_mb": vram_predict_abs,
         }
+
+        # Point-in-time memory quantities (deltas from the run-start baseline)
+        # at each measured stage, recorded to observe how the cache-related
+        # VRAM (the kv cache) allocated by torch evolves across fit / cleanup /
+        # predict.
+        self.ressources = {}
+        for stage, mq in (
+            ("before_fit", self.memory_quantities_before_fit),
+            ("after_fit", self.memory_quantities_after_fit),
+            ("after_fit_cleanup", self.memory_quantities_after_fit_cleanup),
+            ("after_predict", self.memory_quantities_after_predict),
+            ("after_predict_cleanup", self.memory_quantities_after_predict_cleanup),
+        ):
+            self.ressources[f"ram_{stage}_mb"] = mq["ram_mb"]
+            self.ressources[f"vram_{stage}_mb"] = mq["vram_mb"]
 
         # Offload files are no longer needed once predict is done; remove the
         # per-run temp dir so the scratch dir doesn't fill up across runs.
@@ -307,4 +387,11 @@ class BaseTabICLSolver(BaseSolver):
             disk_offload_dir=self._disk_offload_dir_used,
             device=device,
             gpu_name=gpu_name,
+            # Point-in-time memory quantities (deltas from the run-start
+            # baseline) at five stages — before_fit, after_fit,
+            # after_fit_cleanup, after_predict, after_predict_cleanup — to
+            # observe how the cache-related VRAM (the kv cache) allocated by
+            # torch evolves across the run. Stored as objective_* columns in
+            # the result parquet for investigation.
+            **self.ressources,
         )
