@@ -58,11 +58,20 @@ class ResourceTracker:
         tracker.start()
         ...  # the work to measure (e.g. fit + predict)
         peak = tracker.stop()   # -> {"ram_peak_mb": ..., "vram_peak_mb": ...}
+
+    Parameters
+    ----------
+    interval : float, default 0.05
+        Sampling period (seconds) for the background RSS thread.
+    proc : psutil.Process, optional
+        Process to read resident memory from. When omitted, the current
+        process is used. Pass a shared instance so a whole ``run`` reads from
+        the same handle (see :func:`measure_memory_quantities`).
     """
 
-    def __init__(self, interval=0.05):
+    def __init__(self, interval=0.05, proc=None):
         self.interval = interval
-        self.proc = psutil.Process()
+        self.proc = proc if proc is not None else psutil.Process()
         self.baseline_rss = 0
         self.peak_rss = 0
         self._stop_event = None
@@ -151,6 +160,52 @@ class ResourceTracker:
             "vram_peak_mb": float(vram_peak_mb),
             "vram_end_mb": float(vram_end_mb),
         }
+
+
+def measure_memory_quantities(proc, device="cpu"):
+    """Point-in-time snapshot of process RAM (MB) and device VRAM (MB).
+
+    Unlike :class:`ResourceTracker` (which reports *peak* usage over a window
+    between ``start`` and ``stop``), this returns the *current* usage at the
+    instant it is called — a single memory snapshot. Used in ``run`` to
+    record how the cache-related VRAM (the kv cache) allocated by torch
+    evolves across the fit / cleanup / predict stages.
+
+    Parameters
+    ----------
+    proc : psutil.Process
+        Process to read resident memory from. Reuse a single instance across
+        the calls in a run (and pass the same one to
+        :class:`ResourceTracker`) so the whole run reads from the same
+        process handle instead of constructing a fresh ``psutil.Process()``
+        on every snapshot.
+    device : str, default "cpu"
+        The device the solver runs on. VRAM is only read for ``"cuda"``
+        (mirrors :class:`ResourceTracker`, which only tracks CUDA VRAM;
+        mps/xpu report ``0.0``). ``"cpu"`` reads RAM only.
+
+    Returns
+    -------
+    dict
+        ``{"ram_mb": float, "vram_mb": float}`` — absolute current values in
+        MB:
+
+        * ``ram_mb``: ``proc.memory_info().rss`` (resident set).
+        * ``vram_mb``: ``torch.cuda.memory_allocated()`` when CUDA is
+          available, else ``0.0``.
+
+        Values are absolute (not deltas); callers subtract a baseline
+        captured at the start of the run to report incremental snapshots.
+    """
+    ram_mb = proc.memory_info().rss / (1024**2)
+    vram_mb = 0.0
+    if _HAS_TORCH and device == "cuda" and torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+            vram_mb = torch.cuda.memory_allocated() / (1024**2)
+        except Exception:  # pragma: no cover - defensive
+            vram_mb = 0.0
+    return {"ram_mb": float(ram_mb), "vram_mb": float(vram_mb)}
 
 
 def cleanup_before_run(device="cpu"):

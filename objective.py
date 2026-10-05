@@ -9,6 +9,12 @@ Meures, for a TabICL-based classifier or regressor on a tabular dataset:
   ``vram_peak_fit_mb`` / ``vram_peak_predict_mb``), plus a combined
   ``ram_peak_mb`` / ``vram_peak_mb`` (max of the two windows) as the headline
   aggregate peak,
+* point-in-time memory quantities (RAM and VRAM, as deltas from the
+  run-start baseline) at five stages of the run — before fit, after fit,
+  after a post-fit cleanup, after predict, and after a post-predict cleanup
+  (``{ram,vram}_{before_fit,after_fit,after_fit_cleanup,after_predict,
+  after_predict_cleanup}_mb``) — to observe how the cache-related VRAM (the
+  kv cache) allocated by torch evolves across the run,
 * prediction quality (accuracy + log-loss for classification,
   RMSE + R2 for regression).
 
@@ -127,6 +133,20 @@ class Objective(BaseObjective):
         disk_offload_dir=None,
         device="cpu",
         gpu_name=None,
+        # Point-in-time memory quantities (deltas from the run-start
+        # baseline) at five stages, recorded to observe how the cache-related
+        # VRAM (the kv cache) allocated by torch evolves across the run.
+        # Defaults to 0.0 so `benchopt test` (get_one_result) stays valid.
+        ram_before_fit_mb=0.0,
+        vram_before_fit_mb=0.0,
+        ram_after_fit_mb=0.0,
+        vram_after_fit_mb=0.0,
+        ram_after_fit_cleanup_mb=0.0,
+        vram_after_fit_cleanup_mb=0.0,
+        ram_after_predict_mb=0.0,
+        vram_after_predict_mb=0.0,
+        ram_after_predict_cleanup_mb=0.0,
+        vram_after_predict_cleanup_mb=0.0,
     ):
         """Score a solver's predictions and attach resource metrics.
 
@@ -155,6 +175,19 @@ class Objective(BaseObjective):
             "disk_offload_dir": disk_offload_dir,
             "gpu_name": gpu_name,
             "device": device,
+            # Point-in-time memory quantities at five stages (deltas from the
+            # run-start baseline) — stored as objective_* columns for
+            # investigation of cache-related VRAM evolution.
+            "ram_before_fit_mb": ram_before_fit_mb,
+            "vram_before_fit_mb": vram_before_fit_mb,
+            "ram_after_fit_mb": ram_after_fit_mb,
+            "vram_after_fit_mb": vram_after_fit_mb,
+            "ram_after_fit_cleanup_mb": ram_after_fit_cleanup_mb,
+            "vram_after_fit_cleanup_mb": vram_after_fit_cleanup_mb,
+            "ram_after_predict_mb": ram_after_predict_mb,
+            "vram_after_predict_mb": vram_after_predict_mb,
+            "ram_after_predict_cleanup_mb": ram_after_predict_cleanup_mb,
+            "vram_after_predict_cleanup_mb": vram_after_predict_cleanup_mb,
             **PACKAGE_VERSIONS,
         }
         if self.task == "classification":
