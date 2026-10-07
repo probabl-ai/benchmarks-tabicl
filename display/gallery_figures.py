@@ -41,6 +41,7 @@ from consolidate_result_csv import (
     OFFLOAD_MODE,
     PREDICT_TIME,
     RAM_PEAK,
+    TABICL_VERSION,
     VRAM_PEAK,
     VRAM_PEAK_FIT,
     VRAM_PEAK_PREDICT,
@@ -172,6 +173,22 @@ def load_results(csv_path: str | Path = "results/results.csv") -> pd.DataFrame:
     return df
 
 
+def _tabicl_version_label(df: pd.DataFrame) -> str | None:
+    """Return a ``"TabICL <version>"`` footnote string from the results, if any.
+
+    The consolidated CSV carries a ``TabICL version`` column; all rows from a
+    given run share the same value. Returns ``None`` when the column is absent
+    or empty so callers can skip the footnote gracefully.
+    """
+    if TABICL_VERSION not in df.columns:
+        return None
+    vals = df[TABICL_VERSION].dropna()
+    vals = vals[vals.astype(str).str.strip() != ""]
+    if vals.empty:
+        return None
+    return f"TabICL {vals.iloc[0]}"
+
+
 def _agg(df: pd.DataFrame, by: list[str], metric: str) -> pd.DataFrame:
     """Group by ``by`` and take the mean of ``metric``."""
     return df.groupby(by, dropna=False, sort=False)[metric].mean().reset_index()
@@ -247,14 +264,14 @@ def build_fig1_kv_cache(
 
     # (kv value, color, marker, kv_name)
     kv_settings = [
-        (False, COLOR_CACHE_OFF, MARKER_CACHE_OFF, "OFF"),
-        (True, COLOR_CACHE_ON, MARKER_CACHE_ON, "ON"),
+        (False, COLOR_CACHE_OFF, MARKER_CACHE_OFF, "no kv cache"),
+        (True, COLOR_CACHE_ON, MARKER_CACHE_ON, "kv cache"),
     ]
 
     # (metric column, dash, width, metric_name)
     metrics = [
         (PREDICT_TIME, "dash", 2.0, "predict"),
-        ("Total (fit + predict)", "solid", 2.5, "fit+predict"),
+        ("Total (fit + predict)", "solid", 2.5, "fit + predict"),
     ]
 
     for col_idx, x_col, filt, x_title, _ in rows_spec:
@@ -270,15 +287,15 @@ def build_fig1_kv_cache(
                     go.Scatter(
                         x=d[x_col],
                         y=d[metric],
-                        name=f"kv {kv_name} — {metric_name}",
-                        legendgroup=f"kv {kv_name} — {metric_name}",
+                        name=f"{kv_name}, {metric_name}",
+                        legendgroup=f"{kv_name}, {metric_name}",
                         showlegend=(col_idx == 1),
                         mode="lines+markers",
                         line=dict(color=color, width=lw, dash=dash),
                         marker=dict(symbol=marker, size=7, color=color),
                         hovertemplate=(
                             f"{x_title}=%{{x}}<br>{metric_name}=%{{y:.3g}} s"
-                            f"<extra>kv {kv_name}</extra>"
+                            f"<extra>{kv_name}</extra>"
                         ),
                     ),
                     row=r,
@@ -288,20 +305,22 @@ def build_fig1_kv_cache(
         fig.update_xaxes(type="log", title_text=x_title, row=r, col=c)
         fig.update_yaxes(type="log", row=r, col=c)
 
-    fig.update_yaxes(title_text="Time (s)", row=1, col=1)
+    # Label every subplot's y-axis in mobile mode (stacked vertically, each
+    # needs its own label); in desktop mode label only the leftmost (the three
+    # share one y-scale, so labeling each is redundant).
+    for r in range(1, len(rows_spec) + 1) if mobile else (1,):
+        fig.update_yaxes(title_text="Time (s)", row=r, col=1)
 
     _finalize(
         fig,
         title="Figure 1 — KV cache: predict and fit+predict time vs dataset size",
-        subtitle="GPU (NVIDIA L4), classification, 10 classes, "
-        "n_estimators=4, offload=gpu.<br>"
-        "Lines: predict (dashed), fit+predict (solid); "
-        "kv cache OFF (green) vs ON (vermillion). Log axes.",
+        subtitle="GPU (NVIDIA L4), 10 classes, n_estimators=4.",
         height=560,
-        legend_title="KV cache × metric",
+        legend_title=None,
         gallery=gallery,
         plot_area_px=600 if mobile else 240,
         mobile=mobile,
+        footnote=_tabicl_version_label(sub),
     )
     return fig
 
@@ -398,7 +417,7 @@ def build_fig2_vram(
             False,
             COLOR_CACHE_OFF,
             MARKER_CACHE_OFF,
-            "OFF",
+            "no kv cache",
             [
                 (VRAM_PEAK_PREDICT, "dash", 2.5, "predict"),
             ],
@@ -407,7 +426,7 @@ def build_fig2_vram(
             True,
             COLOR_CACHE_ON,
             MARKER_CACHE_ON,
-            "ON",
+            "kv cache",
             [
                 (VRAM_PEAK_PREDICT, "dash", 2.5, "predict"),
                 (VRAM_PEAK_FIT, "solid", 3.5, "fit"),
@@ -428,15 +447,15 @@ def build_fig2_vram(
                     go.Scatter(
                         x=d[x_col],
                         y=d[metric],
-                        name=f"kv {kv_name} — {metric_name}",
-                        legendgroup=f"kv {kv_name} — {metric_name}",
+                        name=f"{kv_name}, {metric_name}",
+                        legendgroup=f"{kv_name}, {metric_name}",
                         showlegend=(col_idx == 1),
                         mode="lines+markers",
                         line=dict(color=color, width=lw, dash=dash),
                         marker=dict(symbol=marker, size=10, color=color),
                         hovertemplate=(
                             f"{x_title}=%{{x}}<br>VRAM {metric_name}=%{{y:.0f}} MB"
-                            f"<extra>kv {kv_name}</extra>"
+                            f"<extra>{kv_name}</extra>"
                         ),
                     ),
                     row=r,
@@ -446,22 +465,24 @@ def build_fig2_vram(
         fig.update_xaxes(type="log", title_text=x_title, row=r, col=c)
         fig.update_yaxes(type="log", row=r, col=c)
 
-    fig.update_yaxes(title_text="VRAM peak (MB)", row=1, col=1)
+    # Label every subplot's y-axis in mobile mode (stacked vertically, each
+    # needs its own label); in desktop mode label only the leftmost (the three
+    # share one y-scale, so labeling each is redundant).
+    for r in range(1, len(rows_spec) + 1) if mobile else (1,):
+        fig.update_yaxes(title_text="VRAM peak (MB)", row=r, col=1)
 
     _finalize(
         fig,
-        title="Figure 2 — KV cache: peak VRAM (fit, predict) vs dataset size",
-        subtitle="GPU (NVIDIA L4), classification, 10 classes, "
-        "n_estimators=4, offload=gpu.<br>"
-        "Lines: fit (solid), predict (dashed); "
-        "predict = resident fit state + predict peak.<br>"
-        "kv OFF — fit is omitted (constant ~110 MB, negligible).<br>"
-        "kv OFF (green) vs ON (vermillion). Log axes.",
+        title=(
+            "Figure 2 — KV cache: peak device memory (fit, predict) vs dataset size"
+        ),
+        subtitle="GPU (NVIDIA L4), 10 classes, n_estimators=4.",
         height=560,
-        legend_title="KV cache × phase",
+        legend_title=None,
         gallery=gallery,
         plot_area_px=600 if mobile else 240,
         mobile=mobile,
+        footnote=_tabicl_version_label(sub),
     )
     return fig
 
@@ -692,6 +713,7 @@ def build_fig3_offload(
         plot_area_px=400 if mobile else 240,
         mobile=mobile,
         legend_offset_px=68 if mobile else None,
+        footnote=_tabicl_version_label(df),
     )
     return fig
 
@@ -706,12 +728,13 @@ def _finalize(
     title: str,
     subtitle: str,
     height: int,
-    legend_title: str,
+    legend_title: str | None = None,
     gallery: bool = False,
     extra_bottom: int = 0,
     plot_area_px: int = 240,
     mobile: bool = False,
     legend_offset_px: int | None = None,
+    footnote: str | None = None,
 ) -> None:
     # Keep the plot area IDENTICAL to the HEAD baseline (240 px tall) so the
     # plot proportions never change. The figure title block (bold title +
@@ -797,7 +820,11 @@ def _finalize(
         paper_bgcolor="rgba(0,0,0,0)",
         hovermode="closest",
         legend=dict(
-            title=dict(text=f"<b>{legend_title}</b>", font_size=13),
+            title=(
+                dict(text=f"<b>{legend_title}</b>", font_size=13)
+                if legend_title
+                else None
+            ),
             orientation="h",
             y=legend_y,
             yanchor=legend_yanchor,
@@ -839,6 +866,24 @@ def _finalize(
         title_font=dict(size=13, color="#1f2937"),
         tickfont=dict(size=11, color="#374151"),
     )
+    # Small footnote (e.g. the TabICL version) pinned at the bottom-right of
+    # the figure, below the legend. The legend is centered, anchored at top,
+    # and grows *downward* into the bottom margin; the footnote is anchored at
+    # the bottom of the margin and grows upward, so the two never collide
+    # (the bottom margin is sized to hold the legend, leaving the lowest band
+    # free for the note). ``bottom_margin`` is in pixels; convert to paper
+    # coords via the fixed plot area height.
+    if footnote:
+        fig.add_annotation(
+            text=f"<span style='font-size:10px;color:#9ca3af'>{footnote}</span>",
+            x=1,
+            xref="paper",
+            xanchor="right",
+            y=-(bottom_margin - 8) / plot_area_px,
+            yref="paper",
+            yanchor="bottom",
+            showarrow=False,
+        )
 
 
 # ---------------------------------------------------------------------------
