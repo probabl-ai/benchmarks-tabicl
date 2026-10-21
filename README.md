@@ -136,9 +136,27 @@ python display/gallery_figures.py --csv results/results.csv \
 # -> display/gallery_figures/fig{1,2,3}_*.html
 ```
 
-The figures are embedded into the TabICL sphinx-gallery page; see the
-script's `--help` for the comparison (`--compare-csv`) and gallery-embed
-(`--gallery-html`) modes.
+Every figure is rendered once per colour theme (`theme="light"` / `"dark"`),
+because Plotly bakes its colours into the SVG and the documentation page is
+readable in both themes.
+
+The standalone HTML follows `--theme {light,dark,both}` (default `light`;
+`both` writes `<name>.html` and `<name>_dark.html`, handy for eyeballing the
+dark palette in a browser). The gallery-embed mode always writes both themes
+and both layouts:
+
+```bash
+python display/gallery_figures.py --gallery-html
+# -> display/gallery_figures/embed/fig{1,2,3}_*.html
+```
+
+Each embed file holds four pre-rendered variants wrapped in
+`.plotly-{desktop,mobile}` and `.plotly-light` / `.plotly-dark` divs, from
+which the TabICL docs CSS displays exactly one (viewport width and
+`html[data-theme]`). Copy them into the TabICL repository as
+`docs/_static/compute_tradeoffs/fig{1,2,3}.html`; the sphinx-gallery page
+inlines them with `.. raw:: html :file:`. See the script's `--help` for the
+comparison (`--compare-csv`) mode.
 
 ## Results
 

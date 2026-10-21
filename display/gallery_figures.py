@@ -48,33 +48,117 @@ from consolidate_result_csv import (
 )
 
 # ---------------------------------------------------------------------------
-# Visual identity (kept from the previous version)
+# Visual identity
 # ---------------------------------------------------------------------------
+#
+# Plotly bakes colours into the rendered SVG, so a single figure cannot follow
+# the page theme. Each figure is therefore rendered once per theme
+# (``theme="light"`` / ``"dark"``) and the documentation page swaps the
+# pre-rendered variants with CSS (see ``--gallery-html``).
+#
+# Both palettes are Okabe-Ito (colour-blind safe). ``light`` is the canonical
+# palette. ``dark`` keeps each light colour's *hue* and only raises its
+# lightness so every series stays above 6:1 contrast on the dark documentation
+# background (#14181e).
+#
+# Hover labels must use an *opaque* bgcolor: plotly composites a translucent
+# hoverlabel.bgcolor against white (not against the figure's paper, and our
+# paper is transparent), so an alpha colour renders as a solid white tooltip
+# under light text in dark mode. For the same reason the traces put the series
+# name in the tooltip *body* and end their hovertemplate with <extra></extra>:
+# the trace-name tag plotly draws next to the body has a hard-coded white
+# 80%-opacity fill that no attribute can recolour.
+#
+# Do NOT "fix" the light palette by darkening its orange or sky blue to reach
+# 3:1 on white: measured under simulated colour-blindness (Machado matrices),
+# darkening Okabe-Ito orange until it reaches 3:1 collapses it into the
+# vermillion (ΔE 18.3 -> 2.3 under deuteranopia), and darkening the sky blue
+# collapses it into the blue (ΔE 26.4 -> 14.4). The lightness *relations*
+# between those hue families are what keeps them separable; encode extra
+# distinction with stroke width or marker shape instead.
+THEMES: dict[str, dict[str, str]] = {
+    "light": {
+        "background": "#ffffff",
+        "text": "#1f2937",
+        "muted": "#6b7280",
+        "tick": "#374151",
+        "faint": "#9ca3af",
+        "grid": "rgba(0,0,0,0.10)",
+        "marker_ring": "#1f2937",
+        "hover_bg": "#ffffff",  # opaque: see note above
+        "hover_border": "#9ca3af",
+        "kv_off": "#009E73",  # bluish green
+        "kv_on": "#D55E00",  # vermillion
+        "gpu_gpu": "#0072B2",  # blue (GPU, offload=gpu)
+        "gpu_cpu": "#56B4E9",  # sky blue (GPU, offload=cpu)
+        "gpu_disk": "#CC79A7",  # reddish purple (GPU, offload=disk)
+        "cpu_cpu": "#E69F00",  # orange (CPU, offload=cpu)
+        "cpu_disk": "#D55E00",  # vermillion (CPU, offload=disk)
+        "bar_time": "#000000",  # black (predict time)
+        "bar_ram": "#0072B2",  # blue (RAM peak)
+        "bar_vram": "#D55E00",  # vermillion (VRAM peak)
+    },
+    "dark": {
+        "background": "#14181e",
+        "text": "#e5e7eb",
+        "muted": "#9ca3af",
+        "tick": "#9ca3af",
+        "faint": "#8b93a1",
+        "grid": "rgba(255,255,255,0.14)",
+        "marker_ring": "#14181e",
+        "hover_bg": "#262b33",  # opaque: see note above
+        "hover_border": "#4b5563",
+        "kv_off": "#00C48C",  # bluish green, lightened
+        "kv_on": "#F2703A",  # vermillion, lightened
+        "gpu_gpu": "#56B4E9",  # sky blue (was blue), lightened
+        "gpu_cpu": "#8FD8F7",  # sky blue, lightened further
+        "gpu_disk": "#E29BC9",  # reddish purple, lightened
+        "cpu_cpu": "#E69F00",  # orange, already 7.9:1 on dark
+        "cpu_disk": "#F2703A",  # vermillion, lightened
+        "bar_time": "#e5e7eb",  # light grey: black vanishes on dark
+        "bar_ram": "#56B4E9",  # sky blue, lightened
+        "bar_vram": "#F2703A",  # vermillion, lightened
+    },
+}
 
-# Kv-cache comparison — Okabe-Ito colorblind-safe palette.
-COLOR_CACHE_OFF = "#009E73"  # bluish green
-COLOR_CACHE_ON = "#D55E00"  # vermillion
 MARKER_CACHE_OFF = "circle"
 MARKER_CACHE_ON = "square"
-
-# Offload comparison (Figure 3) — Okabe-Ito colorblind-safe palette, one color
-# per device x offload config (no color reused across meanings).
-COLOR_GPU_GPU = "#0072B2"  # blue         — GPU, offload=gpu
-COLOR_GPU_CPU = "#56B4E9"  # sky blue     — GPU, offload=cpu
-COLOR_GPU_DISK = "#CC79A7"  # reddish purple— GPU, offload=disk
-COLOR_CPU_CPU = "#E69F00"  # orange       — CPU, offload=cpu
-COLOR_CPU_DISK = "#D55E00"  # vermillion   — CPU, offload=disk
-
-# Figure 3 bar metric colors — Okabe-Ito, distinct from each other and from
-# the offload-config colors above.
-COLOR_BAR_TIME = "#000000"  # black   — predict time
-COLOR_BAR_RAM = "#0072B2"  # blue    — RAM peak
-COLOR_BAR_VRAM = "#D55E00"  # vermillion — VRAM peak
 MARKER_GPU_GPU = "circle"
 MARKER_GPU_CPU = "diamond"
 MARKER_GPU_DISK = "square"
 MARKER_CPU_CPU = "triangle-up"
 MARKER_CPU_DISK = "triangle-down"
+
+THEME_NAMES = tuple(THEMES)
+
+
+def _theme(name: str = "light") -> dict[str, str]:
+    """Return the colour tokens of ``name`` (``"light"`` or ``"dark"``)."""
+    try:
+        return THEMES[name]
+    except KeyError:
+        raise ValueError(
+            f"Unknown theme {name!r}; expected one of {', '.join(THEME_NAMES)}."
+        ) from None
+
+
+# ---------------------------------------------------------------------------
+# Legend / line-style encoding
+# ---------------------------------------------------------------------------
+# The dashed "predict" series is the one readers confuse with the solid
+# "fit + predict" one, because plotly's default swatch is only 30 px wide and
+# its default 6-on/6-off "dash" cycle then reads as a smudge at a 2 px stroke.
+# Give the sample room (one value for both the desktop and the mobile variant)
+# and use a coarser custom dash so the gap survives the small scale. The
+# swatch is only a *sample* of the line: shortening it does not require a
+# shorter dash cycle, it just shows fewer repetitions of it.
+LEGEND_ITEMWIDTH = 40
+DASH_PREDICT = "10px,6px"
+# Desktop-only: give each legend entry a fixed fraction of the plot width so
+# exactly two fit per row at any width. Without it the four-entry legend
+# collapses into a single long row on wide screens (and wraps 3 + 1 in
+# between), whereas the fixed grid keeps it at 2 + 2 with aligned columns.
+LEGEND_ENTRYWIDTH = 0.36
 
 # ---------------------------------------------------------------------------
 # Margin profiles. Two rendering targets share the same figure builders:
@@ -200,7 +284,10 @@ def _agg(df: pd.DataFrame, by: list[str], metric: str) -> pd.DataFrame:
 
 
 def build_fig1_kv_cache(
-    df: pd.DataFrame, gallery: bool = False, mobile: bool = False
+    df: pd.DataFrame,
+    gallery: bool = False,
+    mobile: bool = False,
+    theme: str = "light",
 ) -> go.Figure:
     """Predict and fit+predict time vs dataset size (3 axes), KV cache OFF vs ON.
 
@@ -216,8 +303,9 @@ def build_fig1_kv_cache(
       * row 3: vs n_test      (rows sweep; n_train=4000,  n_features=100)
 
     n_estimators=4, classification, 10 classes, cuda, offload=gpu.
-    Log axes.
+    Log axes. ``theme`` selects the colour token set (``"light"``/``"dark"``).
     """
+    tokens = _theme(theme)
     sub = df[df["Run label"].str.contains(LABEL_SCALING, na=False)].copy()
     sub = sub[sub[NB_ESTIMATORS] == 4]
     sub["Total (fit + predict)"] = sub[FIT_TIME] + sub[PREDICT_TIME]
@@ -264,14 +352,18 @@ def build_fig1_kv_cache(
 
     # (kv value, color, marker, kv_name)
     kv_settings = [
-        (False, COLOR_CACHE_OFF, MARKER_CACHE_OFF, "no kv cache"),
-        (True, COLOR_CACHE_ON, MARKER_CACHE_ON, "kv cache"),
+        (False, tokens["kv_off"], MARKER_CACHE_OFF, "no kv cache"),
+        (True, tokens["kv_on"], MARKER_CACHE_ON, "kv cache"),
     ]
 
-    # (metric column, dash, width, metric_name)
+    # (metric column, dash, width, metric_name). Metrics are the outer loop so
+    # the legend groups identical line styles together: the two "predict"
+    # entries (dashed) first, then the two "fit + predict" entries (solid).
+    # Readers then compare colours within a group instead of having to tell a
+    # dash from a solid between neighbours.
     metrics = [
-        (PREDICT_TIME, "dash", 2.0, "predict"),
-        ("Total (fit + predict)", "solid", 2.5, "fit + predict"),
+        (PREDICT_TIME, DASH_PREDICT, 2.2, "predict"),
+        ("Total (fit + predict)", "solid", 3.0, "fit + predict"),
     ]
 
     for col_idx, x_col, filt, x_title, _ in rows_spec:
@@ -280,9 +372,9 @@ def build_fig1_kv_cache(
             cell = cell[cell[k] == v]
 
         r, c = (col_idx, 1) if mobile else (1, col_idx)
-        for kv, color, marker, kv_name in kv_settings:
-            d = cell[cell[KV_CACHE] == kv].sort_values(x_col)
-            for metric, dash, lw, metric_name in metrics:
+        for metric, dash, lw, metric_name in metrics:
+            for kv, color, marker, kv_name in kv_settings:
+                d = cell[cell[KV_CACHE] == kv].sort_values(x_col)
                 fig.add_trace(
                     go.Scatter(
                         x=d[x_col],
@@ -294,8 +386,9 @@ def build_fig1_kv_cache(
                         line=dict(color=color, width=lw, dash=dash),
                         marker=dict(symbol=marker, size=7, color=color),
                         hovertemplate=(
-                            f"{x_title}=%{{x}}<br>{metric_name}=%{{y:.3g}} s"
-                            f"<extra>{kv_name}</extra>"
+                            f"<b>{kv_name}, {metric_name}</b>"
+                            f"<br>{x_title}=%{{x}}<br>{metric_name}=%{{y:.3g}} s"
+                            "<extra></extra>"
                         ),
                     ),
                     row=r,
@@ -321,6 +414,7 @@ def build_fig1_kv_cache(
         plot_area_px=600 if mobile else 240,
         mobile=mobile,
         footnote=_tabicl_version_label(sub),
+        theme=theme,
     )
     return fig
 
@@ -331,7 +425,10 @@ def build_fig1_kv_cache(
 
 
 def build_fig2_vram(
-    df: pd.DataFrame, gallery: bool = False, mobile: bool = False
+    df: pd.DataFrame,
+    gallery: bool = False,
+    mobile: bool = False,
+    theme: str = "light",
 ) -> go.Figure:
     """Peak VRAM vs three dataset-size axes, KV cache OFF vs ON.
 
@@ -364,7 +461,9 @@ def build_fig2_vram(
       * panel 3: vs n_test      (rows sweep; n_train=4000,  n_features=100)
 
     n_estimators=4, classification, 10 classes, cuda, offload=gpu. Log axes.
+    ``theme`` selects the colour token set (``"light"``/``"dark"``).
     """
+    tokens = _theme(theme)
     sub = df[df["Run label"].str.contains(LABEL_SCALING, na=False)].copy()
     sub = sub[sub[NB_ESTIMATORS] == 4]
 
@@ -411,27 +510,20 @@ def build_fig2_vram(
     # Per-kv metric sets. ``kv OFF — fit`` is omitted: it is constant at
     # ~110 MB across all axes (the estimator's small footprint, no kv cache
     # built), so it would just sit flat at the bottom of the log plot.
-    kv_metrics = [
-        # (kv value, color, marker, kv_name, [(metric, dash, lw, metric_name), ...])
-        (
-            False,
-            COLOR_CACHE_OFF,
-            MARKER_CACHE_OFF,
-            "no kv cache",
-            [
-                (VRAM_PEAK_PREDICT, "dash", 2.5, "predict"),
-            ],
-        ),
-        (
-            True,
-            COLOR_CACHE_ON,
-            MARKER_CACHE_ON,
-            "kv cache",
-            [
-                (VRAM_PEAK_PREDICT, "dash", 2.5, "predict"),
-                (VRAM_PEAK_FIT, "solid", 3.5, "fit"),
-            ],
-        ),
+    #
+    # ``trace_specs`` order doubles as the legend order: the two kv-cache
+    # entries come first so they share the left legend column (predict on the
+    # first row, fit on the second), the no-cache predict line fills the right
+    # column.
+    kv_style = {
+        True: (tokens["kv_on"], MARKER_CACHE_ON, "kv cache"),
+        False: (tokens["kv_off"], MARKER_CACHE_OFF, "no kv cache"),
+    }
+    trace_specs = [
+        # (kv value, metric column, dash, width, metric_name)
+        (True, VRAM_PEAK_PREDICT, DASH_PREDICT, 2.5, "predict"),
+        (False, VRAM_PEAK_PREDICT, DASH_PREDICT, 2.5, "predict"),
+        (True, VRAM_PEAK_FIT, "solid", 3.5, "fit"),
     ]
 
     for col_idx, x_col, filt, x_title, _ in rows_spec:
@@ -440,27 +532,28 @@ def build_fig2_vram(
             cell = cell[cell[k] == v]
 
         r, c = (col_idx, 1) if mobile else (1, col_idx)
-        for kv, color, marker, kv_name, metrics in kv_metrics:
+        for kv, metric, dash, lw, metric_name in trace_specs:
+            color, marker, kv_name = kv_style[kv]
             d = cell[cell[KV_CACHE] == kv].sort_values(x_col)
-            for metric, dash, lw, metric_name in metrics:
-                fig.add_trace(
-                    go.Scatter(
-                        x=d[x_col],
-                        y=d[metric],
-                        name=f"{kv_name}, {metric_name}",
-                        legendgroup=f"{kv_name}, {metric_name}",
-                        showlegend=(col_idx == 1),
-                        mode="lines+markers",
-                        line=dict(color=color, width=lw, dash=dash),
-                        marker=dict(symbol=marker, size=10, color=color),
-                        hovertemplate=(
-                            f"{x_title}=%{{x}}<br>VRAM {metric_name}=%{{y:.0f}} MB"
-                            f"<extra>{kv_name}</extra>"
-                        ),
+            fig.add_trace(
+                go.Scatter(
+                    x=d[x_col],
+                    y=d[metric],
+                    name=f"{kv_name}, {metric_name}",
+                    legendgroup=f"{kv_name}, {metric_name}",
+                    showlegend=(col_idx == 1),
+                    mode="lines+markers",
+                    line=dict(color=color, width=lw, dash=dash),
+                    marker=dict(symbol=marker, size=10, color=color),
+                    hovertemplate=(
+                        f"<b>{kv_name}, {metric_name}</b>"
+                        f"<br>{x_title}=%{{x}}<br>VRAM {metric_name}=%{{y:.0f}} MB"
+                        "<extra></extra>"
                     ),
-                    row=r,
-                    col=c,
-                )
+                ),
+                row=r,
+                col=c,
+            )
 
         fig.update_xaxes(type="log", title_text=x_title, row=r, col=c)
         fig.update_yaxes(type="log", row=r, col=c)
@@ -483,6 +576,7 @@ def build_fig2_vram(
         plot_area_px=600 if mobile else 240,
         mobile=mobile,
         footnote=_tabicl_version_label(sub),
+        theme=theme,
     )
     return fig
 
@@ -493,7 +587,10 @@ def build_fig2_vram(
 
 
 def build_fig3_offload(
-    df: pd.DataFrame, gallery: bool = False, mobile: bool = False
+    df: pd.DataFrame,
+    gallery: bool = False,
+    mobile: bool = False,
+    theme: str = "light",
 ) -> go.Figure:
     """Offload comparison: GPU vs CPU (left) and GPU offload at large n_test (right).
 
@@ -514,6 +611,7 @@ def build_fig3_offload(
       row 1: predict time (left=B, right=C)
       row 2: peak memory (left=B, right=C)
     """
+    tokens = _theme(theme)
     # --- Left panel data: Command B (n_test=200, GPU+CPU) ---
     sub_b = df[df["Run label"].str.contains(LABEL_OFFLOAD, na=False)].copy()
     sub_b = sub_b[(sub_b[NB_TRAIN_SAMPLES] == 4000) & (sub_b[NB_ESTIMATORS] == 4)]
@@ -577,8 +675,8 @@ def build_fig3_offload(
             name="Predict time",
             legendgroup="time",
             showlegend=True,
-            marker_color=COLOR_BAR_TIME,
-            marker_line=dict(width=1, color="#1f2937"),
+            marker_color=tokens["bar_time"],
+            marker_line=dict(width=1, color=tokens["marker_ring"]),
             hovertemplate="%{x}<br>predict=%{y:.3g} s<extra></extra>",
         ),
         row=1,
@@ -597,8 +695,8 @@ def build_fig3_offload(
             name="RAM peak",
             legendgroup="ram",
             showlegend=True,
-            marker_color=COLOR_BAR_RAM,
-            marker_line=dict(width=1, color="#1f2937"),
+            marker_color=tokens["bar_ram"],
+            marker_line=dict(width=1, color=tokens["marker_ring"]),
             hovertemplate="%{x}<br>RAM=%{y:.0f} MB<extra></extra>",
         ),
         row=1,
@@ -617,8 +715,8 @@ def build_fig3_offload(
             name="VRAM peak",
             legendgroup="vram",
             showlegend=True,
-            marker_color=COLOR_BAR_VRAM,
-            marker_line=dict(width=1, color="#1f2937"),
+            marker_color=tokens["bar_vram"],
+            marker_line=dict(width=1, color=tokens["marker_ring"]),
             hovertemplate="%{x}<br>VRAM=%{y:.0f} MB<extra></extra>",
         ),
         row=1,
@@ -639,8 +737,8 @@ def build_fig3_offload(
             name="Predict time",
             legendgroup="time",
             showlegend=False,
-            marker_color=COLOR_BAR_TIME,
-            marker_line=dict(width=1, color="#1f2937"),
+            marker_color=tokens["bar_time"],
+            marker_line=dict(width=1, color=tokens["marker_ring"]),
             hovertemplate="%{x}<br>predict=%{y:.3g} s<extra></extra>",
         ),
         row=r2,
@@ -658,8 +756,8 @@ def build_fig3_offload(
             name="RAM peak",
             legendgroup="ram",
             showlegend=False,
-            marker_color=COLOR_BAR_RAM,
-            marker_line=dict(width=1, color="#1f2937"),
+            marker_color=tokens["bar_ram"],
+            marker_line=dict(width=1, color=tokens["marker_ring"]),
             hovertemplate="%{x}<br>RAM=%{y:.0f} MB<extra></extra>",
         ),
         row=r2,
@@ -677,8 +775,8 @@ def build_fig3_offload(
             name="VRAM peak",
             legendgroup="vram",
             showlegend=False,
-            marker_color=COLOR_BAR_VRAM,
-            marker_line=dict(width=1, color="#1f2937"),
+            marker_color=tokens["bar_vram"],
+            marker_line=dict(width=1, color=tokens["marker_ring"]),
             hovertemplate="%{x}<br>VRAM=%{y:.0f} MB<extra></extra>",
         ),
         row=r2,
@@ -714,6 +812,7 @@ def build_fig3_offload(
         mobile=mobile,
         legend_offset_px=68 if mobile else None,
         footnote=_tabicl_version_label(df),
+        theme=theme,
     )
     return fig
 
@@ -721,6 +820,39 @@ def build_fig3_offload(
 # ---------------------------------------------------------------------------
 # Shared layout helper
 # ---------------------------------------------------------------------------
+
+
+def _legend_kwargs(
+    legend_y: float,
+    legend_yanchor: str,
+    legend_title: str | None,
+    gallery: bool,
+    mobile: bool,
+) -> dict:
+    """Legend layout, shared by every figure.
+
+    The swatch length (``itemwidth``) is identical for the desktop and mobile
+    variants. The fixed entry width is desktop-only: on the mobile variant an
+    entry would end up narrower than swatch + label and the labels would spill
+    out of the figure, while natural wrapping already yields a tidy 2 + 2
+    grid at that width.
+    """
+    kwargs = dict(
+        title=(
+            dict(text=f"<b>{legend_title}</b>", font_size=13) if legend_title else None
+        ),
+        orientation="h",
+        y=legend_y,
+        yanchor=legend_yanchor,
+        x=0.5,
+        xanchor="center",
+        font_size=12,
+        itemwidth=LEGEND_ITEMWIDTH,
+    )
+    if gallery and not mobile:
+        kwargs["entrywidthmode"] = "fraction"
+        kwargs["entrywidth"] = LEGEND_ENTRYWIDTH
+    return kwargs
 
 
 def _finalize(
@@ -735,6 +867,7 @@ def _finalize(
     mobile: bool = False,
     legend_offset_px: int | None = None,
     footnote: str | None = None,
+    theme: str = "light",
 ) -> None:
     # Keep the plot area IDENTICAL to the HEAD baseline (240 px tall) so the
     # plot proportions never change. The figure title block (bold title +
@@ -771,7 +904,12 @@ def _finalize(
     # legend stays at a comfortable mid-band position with a generous bottom
     # margin.
     if gallery:
-        bottom_margin = 90 + extra_bottom
+        # Budget TWO legend rows plus the footnote. Since the swatches were
+        # widened (LEGEND_ITEMWIDTH) a four-entry legend no longer fits on one
+        # row in the gallery column, and the legend is anchored at the top of
+        # the band while the footnote is anchored at its bottom, so the margin
+        # must hold both without the two overlapping.
+        bottom_margin = 148 + extra_bottom
         # Legend sits a fixed *pixel* offset below the plot domain (just past
         # the x-axis tick labels + title), converted to paper coords via the
         # plot area height. This keeps the pixel gap consistent across
@@ -781,7 +919,7 @@ def _finalize(
         # mobile, where the default 45+extra_bottom sits too far below the
         # last subplot's x-axis title).
         legend_offset = (
-            legend_offset_px if legend_offset_px is not None else 45 + extra_bottom
+            legend_offset_px if legend_offset_px is not None else 58 + extra_bottom
         )
         legend_y = -legend_offset / plot_area_px
         legend_yanchor = "top"
@@ -795,6 +933,13 @@ def _finalize(
     band_top = 1 + top_margin / plot_area_px  # paper y of the figure's top edge
     left_margin, right_margin = _GALLERY_LR if gallery else _DEFAULT_LR
     y_standoff = _GALLERY_YSTANDOFF if gallery else _DEFAULT_YSTANDOFF
+    tokens = _theme(theme)
+    # Gallery embeds sit on the documentation page, whose background the CSS
+    # swaps with the theme: keep the paper transparent so the figure inherits
+    # it. Standalone HTML opens on a blank browser page, so it needs the
+    # theme's own opaque background (otherwise dark text on white, or light
+    # text on white, is unreadable).
+    paper_bgcolor = "rgba(0,0,0,0)" if gallery else tokens["background"]
     # Capture the existing (subplot-title) annotations BEFORE adding the
     # figure-title annotation, so the baseline-positioning loop below only
     # touches the subplot titles, not the figure title.
@@ -803,7 +948,7 @@ def _finalize(
     fig.add_annotation(
         text=(
             f"<b>{title}</b><br>"
-            f"<span style='font-size:13px;color:#6b7280'>{subtitle}</span>"
+            f"<span style='font-size:13px;color:{tokens['muted']}'>{subtitle}</span>"
         ),
         x=0.5,
         xref="paper",
@@ -812,25 +957,27 @@ def _finalize(
         yanchor="top",
         xanchor="center",
         showarrow=False,
-        font=dict(size=18),
+        font=dict(size=18, color=tokens["text"]),
     )
     fig.update_layout(
         # layout.title left empty: the figure title is the annotation above.
         plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor=paper_bgcolor,
+        # Legend text (and any unstyled text) follows the theme; plotly's
+        # default is a dark navy that vanishes on a dark background.
+        font=dict(color=tokens["text"]),
+        hoverlabel=dict(
+            bgcolor=tokens["hover_bg"],
+            bordercolor=tokens["hover_border"],
+            font=dict(color=tokens["text"]),
+        ),
         hovermode="closest",
-        legend=dict(
-            title=(
-                dict(text=f"<b>{legend_title}</b>", font_size=13)
-                if legend_title
-                else None
-            ),
-            orientation="h",
-            y=legend_y,
-            yanchor=legend_yanchor,
-            x=0.5,
-            xanchor="center",
-            font_size=12,
+        legend=_legend_kwargs(
+            legend_y=legend_y,
+            legend_yanchor=legend_yanchor,
+            legend_title=legend_title,
+            gallery=gallery,
+            mobile=mobile,
         ),
         margin=dict(l=left_margin, r=right_margin, t=top_margin, b=bottom_margin),
         height=height,
@@ -843,13 +990,13 @@ def _finalize(
         fig.layout.annotations[i].update(
             y=fig.layout.annotations[i].y + 0.03,
             yanchor="bottom",
-            font=dict(size=12, color="#1f2937"),
+            font=dict(size=12, color=tokens["text"]),
         )
     yaxis_kwargs = dict(
         zeroline=False,
-        gridcolor="rgba(0,0,0,0.10)",
-        title_font=dict(size=13, color="#1f2937"),
-        tickfont=dict(size=11, color="#374151"),
+        gridcolor=tokens["grid"],
+        title_font=dict(size=13, color=tokens["text"]),
+        tickfont=dict(size=11, color=tokens["tick"]),
     )
     if y_standoff is not None:
         yaxis_kwargs["title_standoff"] = y_standoff
@@ -862,9 +1009,9 @@ def _finalize(
             getattr(fig.layout, ax_key).matches = "y"
     fig.update_xaxes(
         zeroline=False,
-        gridcolor="rgba(0,0,0,0.10)",
-        title_font=dict(size=13, color="#1f2937"),
-        tickfont=dict(size=11, color="#374151"),
+        gridcolor=tokens["grid"],
+        title_font=dict(size=13, color=tokens["text"]),
+        tickfont=dict(size=11, color=tokens["tick"]),
     )
     # Small footnote (e.g. the TabICL version) pinned at the bottom-right of
     # the figure, below the legend. The legend is centered, anchored at top,
@@ -874,8 +1021,9 @@ def _finalize(
     # free for the note). ``bottom_margin`` is in pixels; convert to paper
     # coords via the fixed plot area height.
     if footnote:
+        note_color = tokens["faint"]
         fig.add_annotation(
-            text=f"<span style='font-size:10px;color:#9ca3af'>{footnote}</span>",
+            text=f"<span style='font-size:10px;color:{note_color}'>{footnote}</span>",
             x=1,
             xref="paper",
             xanchor="right",
@@ -899,6 +1047,7 @@ def build_comparison_fig(
     other_label: str = "pr162",
     gallery: bool = False,
     mobile: bool = False,
+    theme: str = "light",
 ) -> go.Figure:
     """Build a toggleable comparison figure from two datasets.
 
@@ -911,8 +1060,9 @@ def build_comparison_fig(
     long as the same figure is built from both). The toggle uses plotly
     ``updatemenus`` ``restyle`` to flip the ``visible`` flag of each set.
     """
-    fig = build_fn(df_base, gallery=gallery, mobile=mobile)
-    fig_other = build_fn(df_other, gallery=gallery, mobile=mobile)
+    tokens = _theme(theme)
+    fig = build_fn(df_base, gallery=gallery, mobile=mobile, theme=theme)
+    fig_other = build_fn(df_other, gallery=gallery, mobile=mobile, theme=theme)
 
     n_base = len(fig.data)
     n_other = len(fig_other.data)
@@ -945,9 +1095,9 @@ def build_comparison_fig(
                 xanchor="right",
                 y=-0.18,
                 yanchor="top",
-                bgcolor="rgba(0,0,0,0.04)",
-                bordercolor="#9ca3af",
-                font=dict(size=14, color="#1f2937"),
+                bgcolor=tokens["hover_bg"],
+                bordercolor=tokens["hover_border"],
+                font=dict(size=14, color=tokens["text"]),
                 buttons=[
                     dict(
                         label=base_label,
@@ -1010,11 +1160,23 @@ def main() -> None:
         help=(
             "Write gallery-tuned HTML embed snippets (<out>/embed/<name>.html) "
             "with tight margins for the narrow sphinx-gallery column, for "
-            "inlining into a sphinx page via ``.. raw:: html :file:``. Uses "
+            "inlining into a sphinx page via ``.. raw:: html :file:``. Each "
+            "file holds four pre-rendered variants (desktop/mobile x "
+            "light/dark), and the docs CSS shows exactly one of them. Uses "
             "fig.to_html(full_html=False, include_plotlyjs='cdn') so the "
             "snippet is a self-contained <div>+<script> block. "
             "Standalone/standalone-comparison HTML (the default and "
             "--compare-csv modes) always uses the default (generous) margins."
+        ),
+    )
+    ap.add_argument(
+        "--theme",
+        choices=(*THEME_NAMES, "both"),
+        default="light",
+        help=(
+            "Colour theme for the standalone (default) and --compare-csv "
+            "HTML. 'both' writes <name>.html (light) and <name>_dark.html. "
+            "Ignored with --gallery-html, which always embeds both themes."
         ),
     )
     args = ap.parse_args()
@@ -1031,49 +1193,61 @@ def main() -> None:
 
     if args.gallery_html:
         # Gallery-tuned HTML embed snippets for inlining into a sphinx page
-        # via ``.. raw:: html :file:``. Each file contains BOTH a desktop
-        # layout (1 row x N cols) and a mobile layout (N rows x 1 col),
-        # wrapped in ``.plotly-desktop`` / ``.plotly-mobile`` divs so the
-        # docs CSS can swap them by viewport width. Tight margins for the
-        # narrow gallery column; plotly loaded from the CDN (once, in the
-        # desktop snippet — the mobile snippet reuses it).
+        # via ``.. raw:: html :file:``. Each file contains four pre-rendered
+        # variants: desktop (1 row x N cols) / mobile (N rows x 1 col) x
+        # light / dark, wrapped in ``.plotly-desktop`` / ``.plotly-mobile``
+        # and ``.plotly-light`` / ``.plotly-dark`` divs so the docs CSS can
+        # show exactly one. Tight margins for the narrow gallery column;
+        # plotly loaded from the CDN (once, in the first snippet — the other
+        # three reuse it).
         embed_dir = out / "embed"
         embed_dir.mkdir(parents=True, exist_ok=True)
+        variants = [(False, theme) for theme in THEME_NAMES] + [
+            (True, theme) for theme in THEME_NAMES
+        ]
         for name, fn in builders.items():
-            desktop = fn(df, gallery=True, mobile=False)
-            mobile_fig = fn(df, gallery=True, mobile=True)
-            html = (
-                '<div class="plotly-desktop">\n'
-                + desktop.to_html(full_html=False, include_plotlyjs="cdn")
-                + "\n</div>\n"
-                '<div class="plotly-mobile">\n'
-                + mobile_fig.to_html(full_html=False, include_plotlyjs=False)
-                + "\n</div>\n"
-            )
+            parts = []
+            for mobile, theme in variants:
+                layout = "plotly-mobile" if mobile else "plotly-desktop"
+                snippet = fn(df, gallery=True, mobile=mobile, theme=theme).to_html(
+                    full_html=False,
+                    include_plotlyjs="cdn" if not parts else False,
+                )
+                parts.append(
+                    f'<div class="{layout} plotly-{theme}">\n{snippet}\n</div>\n'
+                )
+            html = "".join(parts)
             path = embed_dir / f"{name}.html"
             path.write_text(html)
             print(f"wrote {path}")
-    elif args.compare_csv is None:
-        # Standalone HTML with default (generous) margins.
-        for name, fn in builders.items():
-            fig = fn(df)
-            path = out / f"{name}.html"
-            fig.write_html(path, include_plotlyjs="cdn")
-            print(f"wrote {path}")
     else:
-        # Comparison HTML with default (generous) margins.
-        df_other = load_results(args.compare_csv)
-        for name, fn in builders.items():
-            fig = build_comparison_fig(
-                fn,
-                df,
-                df_other,
-                base_label=args.compare_base_label,
-                other_label=args.compare_other_label,
-            )
-            path = out / f"{name}_comparison_{args.compare_suffix}.html"
-            fig.write_html(path, include_plotlyjs="cdn")
-            print(f"wrote {path}")
+        themes = THEME_NAMES if args.theme == "both" else (args.theme,)
+        if args.compare_csv is None:
+            # Standalone HTML with default (generous) margins.
+            for name, fn in builders.items():
+                for theme in themes:
+                    path = out / f"{name}{'' if theme == 'light' else '_dark'}.html"
+                    (fn(df, theme=theme).write_html(path, include_plotlyjs="cdn"))
+                    print(f"wrote {path}")
+        else:
+            # Comparison HTML with default (generous) margins.
+            df_other = load_results(args.compare_csv)
+            for name, fn in builders.items():
+                for theme in themes:
+                    fig = build_comparison_fig(
+                        fn,
+                        df,
+                        df_other,
+                        base_label=args.compare_base_label,
+                        other_label=args.compare_other_label,
+                        theme=theme,
+                    )
+                    path = out / (
+                        f"{name}_comparison_{args.compare_suffix}"
+                        f"{'' if theme == 'light' else '_dark'}.html"
+                    )
+                    fig.write_html(path, include_plotlyjs="cdn")
+                    print(f"wrote {path}")
 
 
 if __name__ == "__main__":
