@@ -23,6 +23,7 @@ Usage
         --gspread-auth-key .gspread-service-account-key/tabicl-benchmarks-*.json
 """
 
+import contextlib
 import hashlib
 from functools import partial
 from io import BytesIO
@@ -53,6 +54,12 @@ RAM_PEAK_FIT = "RAM peak fit (MB)"
 VRAM_PEAK_FIT = "VRAM peak fit (MB)"
 RAM_PEAK_PREDICT = "RAM peak predict (MB)"
 VRAM_PEAK_PREDICT = "VRAM peak predict (MB)"
+FIT_NB_BATCHES_TF_COL = "Nb batches fit tf_col"
+FIT_NB_BATCHES_TF_ROW = "Nb batches fit tf_row"
+FIT_NB_BATCHES_TF_ICL = "Nb batches fit tf_icl"
+PREDICT_NB_BATCHES_TF_COL = "Nb batches predict tf_col"
+PREDICT_NB_BATCHES_TF_ROW = "Nb batches predict tf_row"
+PREDICT_NB_BATCHES_TF_ICL = "Nb batches predict tf_icl"
 ACCURACY = "Accuracy"
 LOG_LOSS = "Log loss"
 RMSE = "RMSE"
@@ -96,6 +103,12 @@ PARQUET_TABLE_DISPLAY_MAPPING = {
     "objective_vram_peak_fit_mb": VRAM_PEAK_FIT,
     "objective_ram_peak_predict_mb": RAM_PEAK_PREDICT,
     "objective_vram_peak_predict_mb": VRAM_PEAK_PREDICT,
+    "objective_fit_nb_batches_tf_col": FIT_NB_BATCHES_TF_COL,
+    "objective_fit_nb_batches_tf_row": FIT_NB_BATCHES_TF_ROW,
+    "objective_fit_nb_batches_tf_icl": FIT_NB_BATCHES_TF_ICL,
+    "objective_predict_nb_batches_tf_col": PREDICT_NB_BATCHES_TF_COL,
+    "objective_predict_nb_batches_tf_row": PREDICT_NB_BATCHES_TF_ROW,
+    "objective_predict_nb_batches_tf_icl": PREDICT_NB_BATCHES_TF_ICL,
     "objective_accuracy": ACCURACY,
     "objective_log_loss": LOG_LOSS,
     "objective_rmse": RMSE,
@@ -178,6 +191,17 @@ PRIMARY_METRIC_COLUMNS = [
     VRAM_PEAK_PREDICT,
 ]
 
+# Per-run batching observations (not averaged across repetitions, not metric
+# columns: they are integers, or empty when the stage did not run).
+OBSERVATION_COLUMNS = [
+    FIT_NB_BATCHES_TF_COL,
+    FIT_NB_BATCHES_TF_ROW,
+    FIT_NB_BATCHES_TF_ICL,
+    PREDICT_NB_BATCHES_TF_COL,
+    PREDICT_NB_BATCHES_TF_ROW,
+    PREDICT_NB_BATCHES_TF_ICL,
+]
+
 SANITY_METRIC_COLUMNS = [
     ACCURACY,
     LOG_LOSS,
@@ -226,6 +250,7 @@ TABLE_DISPLAY_ORDER = (
     [BENCHMARK_ID_NAME]
     + BENCHMARK_DEFINING_COLUMNS
     + PRIMARY_METRIC_COLUMNS
+    + OBSERVATION_COLUMNS
     + SOLVER_PARAM_COLUMNS
     + [GPU_NAME]
     + PROVENANCE_COLUMNS[1:]  # skip GPU_NAME (already listed)
@@ -294,7 +319,8 @@ def _load_parquet(source):
     # metrics). errors="raise" would crash on any of these; filtering the
     # mapping keeps consolidation robust across task-specific parquets.
     present_mapping = {
-        src: dst for src, dst in PARQUET_TABLE_DISPLAY_MAPPING.items()
+        src: dst
+        for src, dst in PARQUET_TABLE_DISPLAY_MAPPING.items()
         if src in df.columns
     }
     df = df.rename(columns=present_mapping)
@@ -428,10 +454,8 @@ def _gspread_sync(df, gspread_url, gspread_auth_key):
         worksheet.clear_basic_filter()
         worksheet.freeze(0, 0)
         worksheet.resize(rows=n_rows + 1, cols=n_cols)
-        try:
+        with contextlib.suppress(Exception):
             worksheet.clear_notes(global_range)
-        except Exception:
-            pass  # clear_notes can fail on some gspread versions; non-critical
         reset_format = dict(
             backgroundColorStyle=dict(rgbColor=dict(red=1, green=1, blue=1, alpha=1)),
             textFormat=dict(bold=False),

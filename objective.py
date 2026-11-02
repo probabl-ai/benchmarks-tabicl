@@ -127,6 +127,12 @@ class Objective(BaseObjective):
         disk_offload_dir=None,
         device="cpu",
         gpu_name=None,
+        fit_nb_batches_tf_col=None,
+        fit_nb_batches_tf_row=None,
+        fit_nb_batches_tf_icl=None,
+        predict_nb_batches_tf_col=None,
+        predict_nb_batches_tf_row=None,
+        predict_nb_batches_tf_icl=None,
     ):
         """Score a solver's predictions and attach resource metrics.
 
@@ -155,6 +161,12 @@ class Objective(BaseObjective):
             "disk_offload_dir": disk_offload_dir,
             "gpu_name": gpu_name,
             "device": device,
+            "fit_nb_batches_tf_col": fit_nb_batches_tf_col,
+            "fit_nb_batches_tf_row": fit_nb_batches_tf_row,
+            "fit_nb_batches_tf_icl": fit_nb_batches_tf_icl,
+            "predict_nb_batches_tf_col": predict_nb_batches_tf_col,
+            "predict_nb_batches_tf_row": predict_nb_batches_tf_row,
+            "predict_nb_batches_tf_icl": predict_nb_batches_tf_icl,
             **PACKAGE_VERSIONS,
         }
         if self.task == "classification":

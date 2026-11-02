@@ -23,8 +23,20 @@ as the headline aggregate peak.
 ``fit_time`` and ``predict_time`` are always reported separately as objective
 metrics. The per-phase peaks (``ram_peak_fit_mb``, ``vram_peak_predict_mb``,
 ``vram_peak_fit_mb``, ``vram_peak_predict_mb``) are also reported.
+
+Batch observations
+------------------
+The estimator runs with ``verbose=True`` and the fit and predict logs are
+captured to count how many batches each transformer stage processed. The counts
+are stored in ``self.observations`` as ``{fit,predict}_nb_batches_{tf_col,
+tf_row,tf_icl}`` and reported as objective metrics. A stage that does not run
+(every stage of the fit when ``kv_cache=False``; ``tf_icl`` of the fit when
+``kv_cache='repr'``, which caches row representations instead) stays ``None``.
 """
 
+import contextlib
+import io
+import re
 import shutil
 import tempfile
 import time
@@ -160,6 +172,7 @@ class BaseTabICLSolver(BaseSolver):
             offload_mode=self.offload_mode,
             disk_offload_dir=disk_offload_dir,
             n_jobs=self.n_jobs,
+            verbose=True,
             device=self.device,
             use_amp=self.use_amp,
         )
@@ -207,8 +220,10 @@ class BaseTabICLSolver(BaseSolver):
         import gc
 
         import numpy as np
+        from sklearn.base import clone
 
-        est = self._build_estimator()
+        # Untimed and not benchmarked: keep the estimator quiet.
+        est = clone(self._build_estimator()).set_params(verbose=False)
         n_feat = self.X_train.shape[1]
         rng = np.random.default_rng(0)
         X_fit = rng.standard_normal((2, n_feat))
@@ -226,6 +241,38 @@ class BaseTabICLSolver(BaseSolver):
         gc.collect()
         cleanup_before_run(self.device)
 
+    # --- batch observations ------------------------------------------------
+
+    def _record_nb_batches(self, phase, output):
+        """Record the batches processed by each transformer stage in a phase.
+
+        TabICL's ``InferenceManager`` prints one "estimated batch size" line
+        per stage it runs, and a tqdm "Processing <stage>: i/n" bar only when
+        that stage is split into several batches. The line is therefore always
+        there for a stage that ran; its absence is an error, except for
+        ``tf_icl`` when building a ``repr`` cache (see ``forward_with_cache``),
+        which bakes ``y_train`` into the row representations instead of running
+        the ICL transformer.
+        """
+        # With kv_cache=False, fit runs no transformer at all: nothing to parse,
+        # every fit count stays None.
+        if phase == "fit" and not self.kv_cache:
+            return
+        prefix = f"{phase}_nb_batches_"
+        not_run = {"tf_icl"} if (phase == "fit" and self.kv_cache == "repr") else set()
+        for key in self.observations:
+            if not key.startswith(prefix):
+                continue
+            stage = key.removeprefix(prefix)
+            if stage in not_run:
+                continue
+            if f"estimated batch size for {stage}:" not in output:
+                raise RuntimeError(
+                    f"No batching log for {stage} during {phase}; cannot record {key}."
+                )
+            totals = re.findall(rf"Processing {stage}:.*?(\d+)/(\d+) \[", output)
+            self.observations[key] = int(totals[-1][1]) if totals else 1
+
     # --- timed run --------------------------------------------------------
 
     def run(self, stop_val):
@@ -238,21 +285,37 @@ class BaseTabICLSolver(BaseSolver):
 
         self.estimator = self._build_estimator()
 
+        # Batches processed by each transformer stage, over fit and predict.
+        # Stages that do not run keep their None default.
+        self.observations = {
+            f"{phase}_nb_batches_{stage}": None
+            for phase in ("fit", "predict")
+            for stage in ("tf_col", "tf_row", "tf_icl")
+        }
+
         # Fit window: tracker covers the fit (incl. kv_cache build) only.
         self._tracker_fit = ResourceTracker()
         self._tracker_fit.start()
+        # Capture TabICL's verbose stage logs (tqdm bars go to stderr) to count
+        # the batches processed by each transformer stage.
+        stdout, stderr = io.StringIO(), io.StringIO()
         t0 = time.perf_counter()
-        self.estimator.fit(self.X_train, self.y_train)
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            self.estimator.fit(self.X_train, self.y_train)
         t1 = time.perf_counter()
         self.resources_fit = self._tracker_fit.stop()
+        self._record_nb_batches("fit", stdout.getvalue() + stderr.getvalue())
 
         # Predict window: fresh tracker, baseline is the post-fit state so
         # the peak reflects only the incremental predict allocations.
         self._tracker_predict = ResourceTracker()
         self._tracker_predict.start()
-        self.y_pred, self.y_score, self.y_encoder = self._predict(self.X_test)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            self.y_pred, self.y_score, self.y_encoder = self._predict(self.X_test)
         t2 = time.perf_counter()
         self.resources_predict = self._tracker_predict.stop()
+        self._record_nb_batches("predict", stdout.getvalue() + stderr.getvalue())
 
         self.fit_time = t1 - t0
         self.predict_time = t2 - t1
@@ -311,4 +374,5 @@ class BaseTabICLSolver(BaseSolver):
             disk_offload_dir=self._disk_offload_dir_used,
             device=device,
             gpu_name=gpu_name,
+            **self.observations,
         )
