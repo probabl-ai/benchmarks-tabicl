@@ -23,7 +23,6 @@ Usage
         --gspread-auth-key .gspread-service-account-key/tabicl-benchmarks-*.json
 """
 
-import contextlib
 import hashlib
 from functools import partial
 from io import BytesIO
@@ -454,8 +453,7 @@ def _gspread_sync(df, gspread_url, gspread_auth_key):
         worksheet.clear_basic_filter()
         worksheet.freeze(0, 0)
         worksheet.resize(rows=n_rows + 1, cols=n_cols)
-        with contextlib.suppress(Exception):
-            worksheet.clear_notes(global_range)
+        worksheet.clear_notes(global_range)
         reset_format = dict(
             backgroundColorStyle=dict(rgbColor=dict(red=1, green=1, blue=1, alpha=1)),
             textFormat=dict(bold=False),
