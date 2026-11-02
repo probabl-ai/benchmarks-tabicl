@@ -74,8 +74,10 @@ class BaseTabICLSolver(BaseSolver):
     parameters = {
         "n_estimators": [1, 2, 4, 8],
         "batch_size": [_DEFAULT_BATCH_SIZE],  # default; extend to sweep later
-        "kv_cache": [False, True],
-        "offload_mode": ["auto", "gpu", "cpu", "disk"],
+        "kv_cache": [False, "repr", True],
+        # Offloading comparisons are not part of the gallery study: keep the
+        # estimator default as the only value so the results table records it.
+        "offload_mode": ["auto"],
         # No disk_offload_dir here — it comes from the objective's scratch_dir
         # parameter (see get_objective), so it's set once for all solvers.
         "n_jobs": [-1],  # use all cores on CPU
@@ -96,7 +98,7 @@ class BaseTabICLSolver(BaseSolver):
             return True, "n_classes is only used for classification."
         # kv_cache only supports up to 10 classes; skip when above the limit.
         if self.kv_cache and task == "classification" and n_classes > 10:
-            return True, "kv_cache=True only supports n_classes <= 10."
+            return True, f"kv_cache={self.kv_cache!r} only supports n_classes <= 10."
         if not is_device_available(self.device):
             return True, f"device {self.device!r} is not available on this host."
         # disk offload needs a scratch dir; skip (not error) so the full grid
@@ -197,9 +199,10 @@ class BaseTabICLSolver(BaseSolver):
         return y_pred, None, None
 
     def warm_up(self):
-        """Untimed fit + predict on a tiny dummy slice to trigger CUDA kernel /
-        cuDNN / FA3 JIT autotuning. ``run`` builds its own fresh estimator, so
-        this one is discarded.
+        """Untimed fit + predict on a tiny dummy slice.
+
+        Purpose is to trigger CUDA kernel / cuDNN / FA3 JIT autotuning. ``run``
+        builds its own fresh estimator, so this one is discarded.
         """
         import gc
 
@@ -226,8 +229,11 @@ class BaseTabICLSolver(BaseSolver):
     # --- timed run --------------------------------------------------------
 
     def run(self, stop_val):
-        # Clean baseline before any allocation: release leftover state from
-        # prior runs (gc + empty_cache on the matching accelerator backend).
+        # Benchopt reuses the same solver instance across repetitions and
+        # datasets, so the previous fitted estimator (and its KV cache) is
+        # still referenced here. Drop it *before* cleanup; otherwise the
+        # cache survives gc.collect() and contaminates the next VRAM baseline.
+        self.estimator = None
         cleanup_before_run(self.device)
 
         self.estimator = self._build_estimator()
@@ -258,12 +264,10 @@ class BaseTabICLSolver(BaseSolver):
         # end-of-window usage (the retained fit state) gives the absolute
         # footprint during predict — closer to a real inference workload.
         ram_predict_abs = (
-            self.resources_fit["ram_end_mb"]
-            + self.resources_predict["ram_peak_mb"]
+            self.resources_fit["ram_end_mb"] + self.resources_predict["ram_peak_mb"]
         )
         vram_predict_abs = (
-            self.resources_fit["vram_end_mb"]
-            + self.resources_predict["vram_peak_mb"]
+            self.resources_fit["vram_end_mb"] + self.resources_predict["vram_peak_mb"]
         )
 
         # Combined peak (max of the fit and predict windows). The predict
