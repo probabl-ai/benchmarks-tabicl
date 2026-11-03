@@ -32,9 +32,29 @@ are stored in ``self.observations`` as ``{fit,predict}_nb_batches_{tf_col,
 tf_row,tf_icl}`` and reported as objective metrics. A stage that does not run
 (every stage of the fit when ``kv_cache=False``; ``tf_icl`` of the fit when
 ``kv_cache='repr'``, which caches row representations instead) stays ``None``.
+
+Simulated memory budget
+-----------------------
+``run`` starts by cleaning the device, then -- on an accelerator -- reads the
+driver-reported free VRAM and records it as ``vram_available_mb``. That is the
+budget the run really starts from, before any checkpoint is loaded.
+
+The ``available_memory`` parameter (MB) turns this into a controlled
+experiment: when set, the solver allocates a random float32 tensor sized to
+leave only ``available_memory`` MB free on the device, then runs the benchmark
+as usual. This emulates a smaller GPU on a large one, which is what makes the
+estimator's auto-batching policy (and the time it costs) observable without
+touching the hardware. It is CUDA-only: combinations with any other device are
+skipped. The reserve is dropped at the start of the next ``run``, so it never
+contaminates the next cell's baseline. Setting it above the measured
+free memory is an error, since no allocation could honour it.
+
+``vram_available_mb`` is recorded in the results but is not part of the
+consolidated CSV.
 """
 
 import contextlib
+import gc
 import io
 import re
 import shutil
@@ -52,7 +72,9 @@ from benchmark_utils.defaults import (
 )
 from benchmark_utils.memory_tracking import (
     ResourceTracker,
+    allocate_vram_reserve,
     cleanup_before_run,
+    get_available_vram_mb,
     get_gpu_info,
 )
 
@@ -90,6 +112,13 @@ class BaseTabICLSolver(BaseSolver):
         # Offloading comparisons are not part of the gallery study: keep the
         # estimator default as the only value so the results table records it.
         "offload_mode": ["auto"],
+        # Simulated memory budget, in MB. ``None`` (default) runs on the
+        # device as-is. A value below the free VRAM measured at the start of
+        # ``run`` is enforced by allocating a random-float reserve until only
+        # that much is left free, which emulates a smaller GPU and makes the
+        # auto-batching policy observable. CUDA only: combinations with any
+        # other device are skipped. See ``_reserve_vram``.
+        "available_memory": [None],
         # No disk_offload_dir here — it comes from the objective's scratch_dir
         # parameter (see get_objective), so it's set once for all solvers.
         "n_jobs": [-1],  # use all cores on CPU
@@ -113,6 +142,16 @@ class BaseTabICLSolver(BaseSolver):
             return True, f"kv_cache={self.kv_cache!r} only supports n_classes <= 10."
         if not is_device_available(self.device):
             return True, f"device {self.device!r} is not available on this host."
+        # The simulated memory budget works by occupying driver-visible VRAM
+        # until only ``available_memory`` MB are left free. That needs a CUDA
+        # device: it is the only backend the benchmark queries for free
+        # memory, and the only one titrated this way.
+        if self.available_memory is not None and self.device != "cuda":
+            return True, (
+                f"available_memory={self.available_memory} MB is only supported "
+                f"with device='cuda'; got device={self.device!r}. "
+                "Set available_memory=None to run on this device."
+            )
         # disk offload needs a scratch dir; skip (not error) so the full grid
         # runs cleanly without crashing on this config.
         if self.offload_mode == "disk" and scratch_dir is None:
@@ -152,6 +191,57 @@ class BaseTabICLSolver(BaseSolver):
         if d is not None:
             shutil.rmtree(d, ignore_errors=True)
 
+    def _reserve_vram(self):
+        """Leave ``available_memory`` MB free on the device.
+
+        Called at the start of ``run``, right after the cleanup and the free
+        memory measurement, so the reserve is part of the baseline rather than
+        of the measured peak. ``None`` is a no-op; a value above the measured
+        free memory is an error, because it would describe a device with more
+        memory than this one has.
+
+        The reserve is held in ``self._vram_reserve`` for the rest of the run
+        and dropped at the start of the next one (see
+        ``_cleanup_before_run``).
+        """
+        self._vram_reserve = None
+        if self.available_memory is None:
+            return
+        if self.available_memory < 0:
+            raise ValueError(
+                f"available_memory must be non-negative, got {self.available_memory}."
+            )
+        measured = self.vram_available_mb
+        if measured is None:
+            raise RuntimeError(
+                f"available_memory={self.available_memory} MB was requested, but the "
+                f"free memory of device {self.device!r} cannot be queried."
+            )
+        if self.available_memory > measured:
+            raise RuntimeError(
+                f"available_memory={self.available_memory} MB exceeds the "
+                f"{measured:.0f} MB free on {self.device!r} after cleanup: cannot "
+                "emulate a device with more memory than this one has."
+            )
+        self._vram_reserve = allocate_vram_reserve(self.device, self.available_memory)
+
+    def _cleanup_before_run(self):
+        """Release the previous cell's state, then clean the device.
+
+        Drops the simulated memory reserve left by a previous cell, then calls
+        the module-level ``cleanup_before_run`` (gc + synchronize +
+        ``empty_cache``). Called at the start of ``run`` and at the end of
+        ``warm_up``, before anything is measured, so the baseline is clean.
+        Nothing needs to be done at the end of a run: the reserve is released
+        by the next one.
+        """
+        self._vram_reserve = None
+        # Drop the tensor reference first, let the collector reclaim it, and
+        # only then empty the cache: a live tensor cannot be handed back to the
+        # driver, and a dead one only becomes reclaimable after a collection.
+        gc.collect()
+        cleanup_before_run(self.device)
+
     def _build_estimator(self):
         """Construct a fresh estimator with the current parameters.
 
@@ -185,6 +275,10 @@ class BaseTabICLSolver(BaseSolver):
         self.scratch_dir = scratch_dir
         # Default; overwritten when an estimator is built.
         self._disk_offload_dir_used = None
+        # Free VRAM measured at the start of run (None on CPU); recorded as a
+        # result but not consolidated. Simulated reserve tensor, if any.
+        self.vram_available_mb = None
+        self._vram_reserve = None
         # Estimator is built in run().
         self.estimator = None
         # Resource trackers are per-phase: _tracker_fit covers the fit window,
@@ -217,8 +311,6 @@ class BaseTabICLSolver(BaseSolver):
         Purpose is to trigger CUDA kernel / cuDNN / FA3 JIT autotuning. ``run``
         builds its own fresh estimator, so this one is discarded.
         """
-        import gc
-
         import numpy as np
         from sklearn.base import clone
 
@@ -238,8 +330,7 @@ class BaseTabICLSolver(BaseSolver):
         else:
             est.predict(X_pred)
         del est
-        gc.collect()
-        cleanup_before_run(self.device)
+        self._cleanup_before_run()
 
     # --- batch observations ------------------------------------------------
 
@@ -281,7 +372,19 @@ class BaseTabICLSolver(BaseSolver):
         # still referenced here. Drop it *before* cleanup; otherwise the
         # cache survives gc.collect() and contaminates the next VRAM baseline.
         self.estimator = None
-        cleanup_before_run(self.device)
+        # Releases the previous cell's simulated reserve and cleans the device.
+        self._cleanup_before_run()
+
+        # Memory budget this run actually starts from: the driver's free VRAM
+        # right after the cleanup, before any checkpoint is loaded. Recorded
+        # for every accelerator run, with or without a simulated budget.
+        self.vram_available_mb = (
+            None if self.device == "cpu" else get_available_vram_mb(self.device)
+        )
+        # Emulate a smaller device when ``available_memory`` is set. Must run
+        # before the estimator is built so the checkpoint is loaded out of the
+        # simulated budget, exactly as on the smaller GPU.
+        self._reserve_vram()
 
         self.estimator = self._build_estimator()
 
@@ -374,5 +477,9 @@ class BaseTabICLSolver(BaseSolver):
             disk_offload_dir=self._disk_offload_dir_used,
             device=device,
             gpu_name=gpu_name,
+            # Driver-reported free VRAM at the start of run, before loading
+            # anything (None on CPU). Simulation target is the solver param
+            # ``available_memory``, recorded by benchopt as p_solver_*.
+            vram_available_mb=self.vram_available_mb,
             **self.observations,
         )

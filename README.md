@@ -188,6 +188,7 @@ final = (
   | `batch_size` | `8` | default; extend to sweep |
   | `kv_cache` | `False, True` | cache built during `fit` |
   | `offload_mode` | `auto, gpu, cpu, disk` | `disk` uses the objective's `scratch_dir` |
+  | `available_memory` | `None` | simulated free VRAM, in MB: allocates a random-float reserve until only that much is left free, then runs. Above the measured free VRAM is an error. `cuda` only; other devices are skipped when it is set |
   | `n_jobs` | `-1` | use all CPU cores |
   | `device` | `cpu, cuda, mps, xpu` | explicit; runs for unavailable devices are skipped |
 

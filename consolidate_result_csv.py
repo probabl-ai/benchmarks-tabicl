@@ -67,6 +67,7 @@ NB_ESTIMATORS = "Nb estimators"
 BATCH_SIZE = "Batch size"
 KV_CACHE = "KV cache"
 OFFLOAD_MODE = "Offload mode"
+VRAM_AVAILABLE = "VRAM available (MB)"
 NB_JOBS = "Nb jobs"
 DEVICE = "Device"
 USE_AMP = "Use AMP"
@@ -116,6 +117,7 @@ PARQUET_TABLE_DISPLAY_MAPPING = {
     "p_solver_batch_size": BATCH_SIZE,
     "p_solver_kv_cache": KV_CACHE,
     "p_solver_offload_mode": OFFLOAD_MODE,
+    "p_solver_available_memory": VRAM_AVAILABLE,
     "p_solver_n_jobs": NB_JOBS,
     "p_solver_device": DEVICE,
     "p_solver_use_amp": USE_AMP,
@@ -216,6 +218,9 @@ SOLVER_PARAM_COLUMNS = [
     BATCH_SIZE,
     KV_CACHE,
     OFFLOAD_MODE,
+    # Simulated memory budget (solver parameter ``available_memory``). Part of
+    # the grouping/dedup key: a sweep on it must produce distinct rows.
+    VRAM_AVAILABLE,
     NB_JOBS,
     DEVICE,
     USE_AMP,
@@ -312,17 +317,9 @@ def _load_parquet(source):
     cols_to_keep = [c for c in df.columns if c not in OMITTED_PARQUET_COLUMNS]
     df = df[cols_to_keep]
 
-    # Only rename columns that are actually present in this parquet. Different
-    # runs carry different columns (e.g. classification-only parquets lack the
-    # regression metrics; regression-only parquets lack the classification
-    # metrics). errors="raise" would crash on any of these; filtering the
-    # mapping keeps consolidation robust across task-specific parquets.
-    present_mapping = {
-        src: dst
-        for src, dst in PARQUET_TABLE_DISPLAY_MAPPING.items()
-        if src in df.columns
-    }
-    df = df.rename(columns=present_mapping)
+    # ``rename`` ignores keys that are absent from the frame, so columns a
+    # given parquet does not carry are simply left alone.
+    df = df.rename(columns=PARQUET_TABLE_DISPLAY_MAPPING)
 
     return df
 

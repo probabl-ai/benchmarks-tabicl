@@ -17,6 +17,11 @@ Benchopt already records the solver ``time`` column (walltime of
 RAM, CUDA version, package versions) in every result parquet. The
 ``gpu_name``/``device`` columns captured here complement that with the
 accelerator actually selected by TabICL, which benchopt does not record.
+
+``vram_available_mb`` is the driver-reported free VRAM measured at the start of
+the solver's run, after the cleanup and before any checkpoint is loaded. It is
+recorded for reference (and to check what a simulated ``available_memory``
+budget was measured against) but is not part of the consolidated CSV.
 """
 
 import warnings
@@ -127,6 +132,7 @@ class Objective(BaseObjective):
         disk_offload_dir=None,
         device="cpu",
         gpu_name=None,
+        vram_available_mb=None,
         fit_nb_batches_tf_col=None,
         fit_nb_batches_tf_row=None,
         fit_nb_batches_tf_icl=None,
@@ -161,6 +167,7 @@ class Objective(BaseObjective):
             "disk_offload_dir": disk_offload_dir,
             "gpu_name": gpu_name,
             "device": device,
+            "vram_available_mb": vram_available_mb,
             "fit_nb_batches_tf_col": fit_nb_batches_tf_col,
             "fit_nb_batches_tf_row": fit_nb_batches_tf_row,
             "fit_nb_batches_tf_icl": fit_nb_batches_tf_icl,

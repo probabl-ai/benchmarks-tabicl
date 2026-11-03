@@ -184,6 +184,107 @@ def cleanup_before_run(device="cpu"):
         pass
 
 
+def get_available_vram_mb(device="cpu"):
+    """Return the driver-reported free VRAM (MB) for ``device``.
+
+    Unlike ``torch.cuda.memory_allocated`` (which only sees this process's
+    tensors), the backend's ``mem_get_info`` reports what the *driver* still
+    has free, i.e. it also accounts for other processes on the same GPU. That
+    is the quantity the auto-batcher works from, so it is the one worth
+    recording.
+
+    This is the same query TabICL's ``InferenceManager.get_available_gpu_memory``
+    performs on CUDA, in the same unit (MB). That method additionally
+    synchronizes the device and calls ``empty_cache()`` first; the solver here
+    does that beforehand through ``cleanup_before_run``, so both return the
+    same driver reading. Unlike TabICL's, this helper returns ``None`` rather
+    than ``0.0`` when the backend cannot report memory, so that "unknown" is
+    never mistaken for "no memory left".
+
+    Returns
+    -------
+    float or None
+        Free memory in MB, or ``None`` for ``"cpu"``, when torch is missing,
+        or when the backend exposes no memory query (e.g. MPS).
+    """
+    if not _HAS_TORCH or device == "cpu":
+        return None
+    backend = getattr(torch, device, None)
+    if backend is None:
+        return None
+    mem_get_info = getattr(backend, "mem_get_info", None)
+    if not callable(mem_get_info):
+        return None
+    try:
+        try:
+            free, _total = mem_get_info(torch.device(device))
+        except TypeError:
+            # Some backends expose mem_get_info() without a device argument.
+            free, _total = mem_get_info()
+    except Exception:  # pragma: no cover - defensive
+        return None
+    return free / (1024**2)
+
+
+def allocate_vram_reserve(device, target_free_mb, tolerance_mb=1.0):
+    """Occupy VRAM with one tensor, leaving about ``target_free_mb`` free.
+
+    The tensor is sized from the free memory measured right before the
+    allocation, so the target is reached without knowing the total device
+    capacity. It is filled with random floats (rather than a bare
+    ``torch.empty``) so the pages are actually committed, which is what the
+    driver's free-memory counter reflects.
+
+    The size is deliberately **conservative**: ``tolerance_mb`` is left on top
+    of the target, and the request is rounded down to a 2 MiB multiple, which
+    is the granularity the allocator uses for large segments. The reserve
+    therefore never overshoots the target, and the few remaining MB of slack
+    are irrelevant at the GB-scale accuracy this is used for.
+
+    Parameters
+    ----------
+    device : str
+        Accelerator to allocate on; ``"cpu"`` is rejected.
+    target_free_mb : float
+        Free memory, in MB, to leave available once the reserve is in place.
+    tolerance_mb : float, default 1.0
+        Extra free memory left on top of the target, as a safety margin.
+
+    Returns
+    -------
+    torch.Tensor or None
+        The reserve, or ``None`` when the device is already within the
+        tolerance of the target. Keep the reference alive to keep the memory
+        occupied; drop it and call :func:`cleanup_before_run` to release it.
+
+    Raises
+    ------
+    RuntimeError
+        If the device cannot report its free memory.
+    """
+    if not _HAS_TORCH or device == "cpu":
+        raise ValueError(f"VRAM reservation requires an accelerator, got {device!r}.")
+
+    free_mb = get_available_vram_mb(device)
+    if free_mb is None:
+        raise RuntimeError(
+            f"device {device!r} cannot report its free memory; "
+            "cannot simulate a restricted memory budget."
+        )
+
+    missing_mb = free_mb - float(target_free_mb) - float(tolerance_mb)
+    mib2 = 2 * 1024**2
+    n_bytes = int(missing_mb * 1024**2) // mib2 * mib2
+    if n_bytes < 10 * 1024**2:
+        # Nothing meaningful to reserve: either the device is already at the
+        # target, or the reserve would fall in the allocator's 20 MiB bucket.
+        return None
+
+    tensor = torch.empty(n_bytes // 4, dtype=torch.float32, device=device)
+    tensor.uniform_()
+    return tensor
+
+
 def get_gpu_info(device="cpu"):
     """Return ``(gpu_name, device_str)`` for the given device.
 
