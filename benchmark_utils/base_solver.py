@@ -200,9 +200,9 @@ class BaseTabICLSolver(BaseSolver):
         free memory is an error, because it would describe a device with more
         memory than this one has.
 
-        The reserve is held in ``self._vram_reserve`` for the rest of the run
-        and dropped at the start of the next one (see
-        ``_cleanup_before_run``).
+        The reserve is a single tensor held in ``self._vram_reserve`` and
+        dropped by ``_cleanup_before_run`` at the end of the run that allocated
+        it.
         """
         self._vram_reserve = None
         if self.available_memory is None:
@@ -228,16 +228,18 @@ class BaseTabICLSolver(BaseSolver):
     def _cleanup_before_run(self):
         """Release the previous cell's state, then clean the device.
 
-        Drops the simulated memory reserve left by a previous cell, then calls
-        the module-level ``cleanup_before_run`` (gc + synchronize +
-        ``empty_cache``). Called at the start of ``run`` and at the end of
-        ``warm_up``, before anything is measured, so the baseline is clean.
-        Nothing needs to be done at the end of a run: the reserve is released
-        by the next one.
+        Drops the fitted estimator (with its KV cache, which lives on the
+        device) and the simulated reserve tensor, then calls the module-level
+        ``cleanup_before_run`` (gc + synchronize + ``empty_cache``). It runs at
+        the start and in the ``finally`` of every ``run``, and at the end of
+        ``warm_up``: benchopt keeps every solver instance alive for the whole
+        invocation, so whatever a cell still references stays charged to the
+        driver and would shrink the budget measured by the next one.
         """
+        self.estimator = None
         self._vram_reserve = None
-        # Drop the tensor reference first, let the collector reclaim it, and
-        # only then empty the cache: a live tensor cannot be handed back to the
+        # Drop the references first, let the collector reclaim them, and only
+        # then empty the cache: a live tensor cannot be handed back to the
         # driver, and a dead one only becomes reclaimable after a collection.
         gc.collect()
         cleanup_before_run(self.device)
@@ -276,7 +278,8 @@ class BaseTabICLSolver(BaseSolver):
         # Default; overwritten when an estimator is built.
         self._disk_offload_dir_used = None
         # Free VRAM measured at the start of run (None on CPU); recorded as a
-        # result but not consolidated. Simulated reserve tensor, if any.
+        # result but not consolidated. Simulated reserve (a single tensor, or
+        # None), dropped at the end of every run.
         self.vram_available_mb = None
         self._vram_reserve = None
         # Estimator is built in run().
@@ -367,12 +370,20 @@ class BaseTabICLSolver(BaseSolver):
     # --- timed run --------------------------------------------------------
 
     def run(self, stop_val):
-        # Benchopt reuses the same solver instance across repetitions and
-        # datasets, so the previous fitted estimator (and its KV cache) is
-        # still referenced here. Drop it *before* cleanup; otherwise the
-        # cache survives gc.collect() and contaminates the next VRAM baseline.
-        self.estimator = None
-        # Releases the previous cell's simulated reserve and cleans the device.
+        # Timed entry point. The cleanup is in a ``finally`` so that a cell
+        # that aborts (an OOM, typically) cannot leave its reserve or its
+        # fitted estimator charged to the device: benchopt keeps every solver
+        # object alive for the whole invocation, so nothing else would release
+        # them before the end of the run.
+        try:
+            self._run(stop_val)
+        finally:
+            self._cleanup_before_run()
+
+    def _run(self, stop_val):
+        # Release whatever the previous repetition left behind (estimator, KV
+        # cache, simulated reserve) and clean the device, so the free-VRAM
+        # baseline measured below is not polluted by earlier cells.
         self._cleanup_before_run()
 
         # Memory budget this run actually starts from: the driver's free VRAM
