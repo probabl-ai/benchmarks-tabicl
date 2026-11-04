@@ -347,11 +347,19 @@ class BaseTabICLSolver(BaseSolver):
         ``tf_icl`` when building a ``repr`` cache (see ``forward_with_cache``),
         which bakes ``y_train`` into the row representations instead of running
         the ICL transformer.
+
+        On CPU there is nothing to parse: the manager returns before the
+        verbose line is printed, because auto-batching does not exist there
+        (``if self.exe_device.type == "cpu": return self._run_forward(...)``).
+        Every stage that runs does so in a single pass, so the count is 1.
         """
         # With kv_cache=False, fit runs no transformer at all: nothing to parse,
         # every fit count stays None.
         if phase == "fit" and not self.kv_cache:
             return
+        # No batching on CPU: record the single pass instead of looking for a
+        # log line that TabICL never prints there.
+        on_cpu = self.device == "cpu"
         prefix = f"{phase}_nb_batches_"
         not_run = {"tf_icl"} if (phase == "fit" and self.kv_cache == "repr") else set()
         for key in self.observations:
@@ -359,6 +367,9 @@ class BaseTabICLSolver(BaseSolver):
                 continue
             stage = key.removeprefix(prefix)
             if stage in not_run:
+                continue
+            if on_cpu:
+                self.observations[key] = 1
                 continue
             if f"estimated batch size for {stage}:" not in output:
                 raise RuntimeError(
