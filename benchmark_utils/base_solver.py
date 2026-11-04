@@ -121,7 +121,9 @@ class BaseTabICLSolver(BaseSolver):
         "available_memory": [None],
         # No disk_offload_dir here — it comes from the objective's scratch_dir
         # parameter (see get_objective), so it's set once for all solvers.
-        "n_jobs": [-1],  # use all cores on CPU
+        # TabICL's default: None leaves PyTorch's thread count alone (the
+        # number of physical CPU cores). ``-1`` would use every logical core.
+        "n_jobs": [None],
         "device": DEVICE_GRID,  # explicit; unavailable devices are skipped
         "use_amp": ["auto"],  # automatic mixed precision; extend to sweep later
     }
@@ -343,10 +345,16 @@ class BaseTabICLSolver(BaseSolver):
         TabICL's ``InferenceManager`` prints one "estimated batch size" line
         per stage it runs, and a tqdm "Processing <stage>: i/n" bar only when
         that stage is split into several batches. The line is therefore always
-        there for a stage that ran; its absence is an error, except for
-        ``tf_icl`` when building a ``repr`` cache (see ``forward_with_cache``),
-        which bakes ``y_train`` into the row representations instead of running
-        the ICL transformer.
+        there for a stage that ran, with two exceptions, both about ``tf_icl``:
+
+        * when building a ``repr`` cache (see ``forward_with_cache``), which
+          bakes ``y_train`` into the row representations instead of running the
+          ICL transformer;
+        * in hierarchical classification (any class count above the model's
+          10-class head), where the ICL head is applied once per tree node with
+          ``auto_batch=False`` (see ``_predict_hierarchical``) and the manager
+          returns before printing. There is no single batch count to record, so
+          the value stays ``None``.
 
         On CPU there is nothing to parse: the manager returns before the
         verbose line is printed, because auto-batching does not exist there
@@ -372,6 +380,11 @@ class BaseTabICLSolver(BaseSolver):
                 self.observations[key] = 1
                 continue
             if f"estimated batch size for {stage}:" not in output:
+                # Hierarchical classification runs the ICL head once per tree
+                # node without auto-batching, so TabICL never prints the line.
+                # Leave the observation unset rather than invent a count.
+                if stage == "tf_icl" and phase == "predict":
+                    continue
                 raise RuntimeError(
                     f"No batching log for {stage} during {phase}; cannot record {key}."
                 )
