@@ -47,12 +47,12 @@ SEED = "Seed"
 WALLTIME = "Walltime"
 FIT_TIME = "Fit time"
 PREDICT_TIME = "Predict time"
-RAM_PEAK = "RAM peak (MB)"
-VRAM_PEAK = "VRAM peak (MB)"
-RAM_PEAK_FIT = "RAM peak fit (MB)"
-VRAM_PEAK_FIT = "VRAM peak fit (MB)"
-RAM_PEAK_PREDICT = "RAM peak predict (MB)"
-VRAM_PEAK_PREDICT = "VRAM peak predict (MB)"
+RAM_PEAK = "RAM peak (GB)"
+VRAM_PEAK = "VRAM peak (GB)"
+RAM_PEAK_FIT = "RAM peak fit (GB)"
+VRAM_PEAK_FIT = "VRAM peak fit (GB)"
+RAM_PEAK_PREDICT = "RAM peak predict (GB)"
+VRAM_PEAK_PREDICT = "VRAM peak predict (GB)"
 FIT_NB_BATCHES_TF_COL = "Nb batches fit tf_col"
 FIT_NB_BATCHES_TF_ROW = "Nb batches fit tf_row"
 FIT_NB_BATCHES_TF_ICL = "Nb batches fit tf_icl"
@@ -67,7 +67,7 @@ NB_ESTIMATORS = "Nb estimators"
 BATCH_SIZE = "Batch size"
 KV_CACHE = "KV cache"
 OFFLOAD_MODE = "Offload mode"
-VRAM_AVAILABLE = "VRAM available (MB)"
+VRAM_AVAILABLE = "Available Device Memory (MiB)"
 NB_JOBS = "Nb jobs"
 DEVICE = "Device"
 USE_AMP = "Use AMP"
@@ -86,6 +86,20 @@ CUDA_VERSION = "CUDA version"
 NUMPY_VERSION = "Numpy version"
 SCIPY_VERSION = "Scipy version"
 RUN_DATE = "Run date"
+
+# The parquet stores peaks in MiB (bytes / 1024**2). The table shows decimal
+# GB (1 GB = 10**9 bytes), so one MiB is 1024**2 / 10**9 GB. The simulated
+# budget is left in MiB: it is a user-supplied setting and must keep its round
+# values (450, 900, 12000, ...).
+MIB_TO_GB = 1024**2 / 1e9
+MIB_TO_GB_COLUMNS = [
+    RAM_PEAK,
+    VRAM_PEAK,
+    RAM_PEAK_FIT,
+    VRAM_PEAK_FIT,
+    RAM_PEAK_PREDICT,
+    VRAM_PEAK_PREDICT,
+]
 
 # --- Parquet → display name mapping ---
 
@@ -212,17 +226,15 @@ SANITY_METRIC_COLUMNS = [
 
 NUMERIC_METRIC_COLUMNS = PRIMARY_METRIC_COLUMNS + SANITY_METRIC_COLUMNS
 
-# Solver parameter columns (part of the grouping key for averaging + dedup).
-# NB_ESTIMATORS is in BENCHMARK_DEFINING_COLUMNS, not here.
+# Other solver parameter columns (part of the grouping key for averaging +
+# dedup).
 SOLVER_PARAM_COLUMNS = [
-    BATCH_SIZE,
+    DEVICE,
+    VRAM_AVAILABLE,
     KV_CACHE,
     OFFLOAD_MODE,
-    # Simulated memory budget (solver parameter ``available_memory``). Part of
-    # the grouping/dedup key: a sweep on it must produce distinct rows.
-    VRAM_AVAILABLE,
+    BATCH_SIZE,
     NB_JOBS,
-    DEVICE,
     USE_AMP,
 ]
 
@@ -245,19 +257,18 @@ PROVENANCE_COLUMNS = [
 ]
 
 # --- Display order ---
-# Left frame: benchmark id + defining columns (incl. nb_estimators)
-# Pivot: primary metrics (fit_time, predict_time, ram, vram) — bold, frozen after
-# Middle: remaining solver params + provenance
-# Rightmost: sanity metrics (accuracy etc) + run date
+# Shared by the CSV and the sheet: a plain concatenation of the top-level
+# lists below. The left frame (frozen in the sheet) is the workload identity;
+# the right frame starts with the headline metrics, then the solver parameters
+# (device and memory budget first), the batch counts and provenance.
+LEFT_FRAME_COLUMNS = [BENCHMARK_ID_NAME] + BENCHMARK_DEFINING_COLUMNS
 
 TABLE_DISPLAY_ORDER = (
-    [BENCHMARK_ID_NAME]
-    + BENCHMARK_DEFINING_COLUMNS
+    LEFT_FRAME_COLUMNS
     + PRIMARY_METRIC_COLUMNS
-    + OBSERVATION_COLUMNS
     + SOLVER_PARAM_COLUMNS
-    + [GPU_NAME]
-    + PROVENANCE_COLUMNS[1:]  # skip GPU_NAME (already listed)
+    + OBSERVATION_COLUMNS
+    + PROVENANCE_COLUMNS
     + SANITY_METRIC_COLUMNS
     + [RUN_DATE]
 )
@@ -321,13 +332,17 @@ def _load_parquet(source):
     # given parquet does not carry are simply left alone.
     df = df.rename(columns=PARQUET_TABLE_DISPLAY_MAPPING)
 
+    for col in MIB_TO_GB_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col] * MIB_TO_GB
+
     return df
 
 
 def _aggregate_repetitions(df):
     """Average numeric metrics across repetitions (idx_rep).
 
-    Groups by (benchmark-defining + solver params + provenance). If only one
+    Groups by (benchmark-defining + solver params + run context + provenance).
     rep per group, values pass through unchanged. If multiple reps, numeric
     columns are averaged and formatted as ``mean±std`` strings.
     """
@@ -424,17 +439,101 @@ def _df_to_csv(df, target):
     )
     df = df.copy()
     for col in NUMERIC_METRIC_COLUMNS:
-        if col in df.columns and df[col].dtype.kind in "f":
-            df[col] = df[col].map(float_format_fn)
+        if col not in df.columns:
+            continue
+        # Aggregated columns are object dtype (a mix of "mean±std" strings and
+        # bare floats for zero-variance cells); format the bare floats too,
+        # otherwise pandas writes them at full float precision.
+        df[col] = df[col].map(
+            lambda v: float_format_fn(v) if isinstance(v, (float, np.floating)) else v
+        )
     df.to_csv(target, index=False, mode="a", date_format=DATES_FORMAT)
+
+
+# --- spreadsheet view -------------------------------------------------------
+#
+# The sheet is read and filtered by hand: peaks are already in decimal GB
+# (converted at load), the budget stays in MiB, every number carries three
+# significant digits, and the ± std is shown only above 10% of the mean.
+
+# Display precision: three significant digits, and a ± only when the std
+# exceeds 10% of the mean.
+_SIG_DIGITS = 3
+STD_DISPLAY_THRESHOLD = 0.10
+
+
+def _round_sig(value, digits=_SIG_DIGITS):
+    """Round ``value`` to ``digits`` significant digits."""
+    if value == 0 or not np.isfinite(value):
+        return value
+    return round(value, digits - int(np.floor(np.log10(abs(value)))) - 1)
+
+
+def _fmt_sig(value):
+    """Format a number with at most three significant digits, no exponent.
+
+    Anything below ``1e-4`` is below the resolution of these measurements;
+    printing ``2.2e-06`` would be noise, so it is shown as ``0``.
+    """
+    value = float(value)
+    if abs(value) < 1e-4:
+        return "0"
+    value = _round_sig(value)
+    return "0" if value == 0 else f"{value:g}"
+
+
+def _reformat_metric(value):
+    """Round a ``mean±std`` cell for the spreadsheet.
+
+    The ± std is shown only when it exceeds ``STD_DISPLAY_THRESHOLD`` of the
+    mean; below that it is visual noise.
+    """
+    text = str(value).strip()
+    if text in ("", "nan"):
+        return value
+    parts = text.split("±")
+    try:
+        mean = float(parts[0])
+    except ValueError:
+        return value
+    shown = _fmt_sig(mean)
+    if len(parts) == 1:
+        return shown
+    try:
+        std = float(parts[1])
+    except ValueError:
+        return shown
+    if mean != 0 and std > STD_DISPLAY_THRESHOLD * abs(mean):
+        return f"{shown}±{_fmt_sig(std)}"
+    return shown
+
+
+def _gspread_view(df):
+    """Return the spreadsheet-friendly view of the canonical table.
+
+    The units and column order are the canonical ones; only the numeric
+    formatting changes (three significant digits, ± above 10% of the mean).
+    """
+    out = df.copy()
+
+    for col in [*PRIMARY_METRIC_COLUMNS, *SANITY_METRIC_COLUMNS, VRAM_AVAILABLE]:
+        if col in out.columns:
+            out[col] = out[col].map(_reformat_metric)
+
+    for col in TABLE_DISPLAY_ORDER:
+        if col not in out.columns:
+            out[col] = ""
+    return out[TABLE_DISPLAY_ORDER]
 
 
 def _gspread_sync(df, gspread_url, gspread_auth_key):
     """Sync the dataframe to a Google Spreadsheet with formatting."""
     import gspread
 
+    df = _gspread_view(df)
+
     n_rows, n_cols = df.shape
-    pivot_col = df.columns.get_loc(VRAM_PEAK) + 1
+    pivot_col = len(LEFT_FRAME_COLUMNS)
 
     gs = gspread.service_account(gspread_auth_key)
     sheet = gs.open_by_url(gspread_url)
@@ -470,7 +569,7 @@ def _gspread_sync(df, gspread_url, gspread_auth_key):
     # Set filter
     worksheet.set_basic_filter(1, 1, n_rows + 1, n_cols)
 
-    # Freeze: header row + defining columns (up to the first primary metric)
+    # Freeze: header row + left frame (run identity)
     worksheet.freeze(rows=1, cols=pivot_col)
 
     format_queries = []
