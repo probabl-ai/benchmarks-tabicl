@@ -17,19 +17,20 @@
 #   1. GPU scaling   rows / columns / test size, 10-class classification
 #   2. GPU memory    simulated available-memory budgets, same workload
 #   3. CPU scaling   rows / columns / test size, plus one GPU-matched point
+#   4. small loads   rows / features / test, both devices, ~0.4-5.5 s band
 #
 #   EXTENDED (--full)                    ~6 h (estimate), same machine
 #   -----------------
-#   4. classes       n_classes ∈ {10,30,100,300,1000}, at two dataset sizes
-#   5. factorial     rows × columns × test, 2×2×2 (validates the cost model)
-#   6. many-class    n_classes=100, 9-point rows / columns / test
-#   7. many-class    memory budgets, small workload
-#   8. many-class    memory budgets, large workload
-#   9. regression    9-point rows / columns / test / large-train test slices
-#  10. regression    memory budgets, small workload
-#  11. regression    memory budgets, large workload
-#  12. estimators    n_estimators ∈ {1,2,4,8}, classification
-#  13. estimators    n_estimators ∈ {1,2,4,8}, regression
+#   5. classes       n_classes ∈ {10,30,100,300,1000}, at two dataset sizes
+#   6. factorial     rows × columns × test, 2×2×2 (validates the cost model)
+#   7. many-class    n_classes=100, 9-point rows / columns / test
+#   8. many-class    memory budgets, small workload
+#   9. many-class    memory budgets, large workload
+#  10. regression    9-point rows / columns / test / large-train test slices
+#  11. regression    memory budgets, small workload
+#  12. regression    memory budgets, large workload
+#  13. estimators    n_estimators ∈ {1,2,4,8}, classification
+#  14. estimators    n_estimators ∈ {1,2,4,8}, regression
 #
 # Design notes
 # ------------
@@ -49,6 +50,15 @@
 #   Anything larger would need disk offload, which is not the default and would
 #   change the walltime being measured. For the same reason there is no wide
 #   many-class rows anchor: 4900 rows × 400 features already peaks at 18.6 GB.
+# * The fourth core slice covers the fast regime, where the study otherwise
+#   has no data. It mirrors the large GPU scaling: rows, features and test are
+#   each swept over five points while the other two stay at a moderate value
+#   (100 rows, 10 features, 100 test rows), and every dataset runs on CPU and
+#   GPU so the two devices are compared on identical workloads. The CPU floor
+#   is ~0.7 s at 8 estimators (model load and per-estimator overhead), so
+#   0.1 s is not reachable on CPU; the grids span the band that is. The cache
+#   is on there, which moves the work into fit and leaves predict short, so
+#   the fit/predict split is the informative part; one mode keeps it readable.
 # * Memory sweeps run at two workload sizes, because a low budget is the only
 #   place where the auto-batcher's cost can show up: the small workload shows
 #   that splitting is nearly free, the larger one probes where it starts to
@@ -65,7 +75,9 @@
 # Cache modes and constraints
 # ---------------------------
 # The core and the regression scaling run the three cache modes
-# (kv_cache=False / 'repr' / True). The many-class slices run with the cache
+# (kv_cache=False / 'repr' / True); the small-workload slice runs with the
+# cache on only, so the CPU and GPU curves are not multiplied by the modes.
+# The many-class slices run with the cache
 # off: it supports at most 10 classes and the solver skips the other modes.
 # Regression pins n_classes=10 (the datum is only meaningful for
 # classification, and other values would just duplicate the instances).
@@ -106,7 +118,8 @@
 # Outputs
 # -------
 # One parquet per invocation, in outputs/ (benchopt appends _1, _2 on re-runs):
-#   compute_time_{gpu_scaling,gpu_memory,cpu_scaling}.parquet        (core)
+#   compute_time_{gpu_scaling,gpu_memory,cpu_scaling,
+#                 small_workloads}.parquet                           (core)
 #   extra_gpu_{classes,factorial,manyclass_scaling,manyclass_memory,
 #              manyclass_memory_large,regression,regression_memory,
 #              regression_memory_large,estimators,
@@ -182,6 +195,19 @@ MEM_N_TEST=1000
 CPU_ROWS_TRAIN="[100,250,600,1600,4000]"
 CPU_COLS_FEATURES="[10,25,55,130,300]"
 CPU_TEST_SAMPLES="[50,150,450,1350,4000]"
+
+# --- core: small workloads --------------------------------------------------
+# Three one-axis slices at a moderate shape (100 rows, 10 features, 100 test
+# rows), mirroring the large GPU scaling. Features start at 4: the 10-class
+# generator needs 2**n_features >= n_classes. Measured on the L4 (3 reps):
+# CPU 0.82 -> 5.45 s, GPU 0.41 -> 0.94 s; the CPU floor is ~0.7 s at 8
+# estimators, so this is the reachable fast band.
+SMALL_ROWS_TRAIN="[10,30,100,300,1000]"
+SMALL_FEATURES="[4,8,16,32,64]"
+SMALL_TEST_SAMPLES="[10,30,100,300,1000]"
+SMALL_N_TRAIN=100
+SMALL_N_FEATURES=10
+SMALL_N_TEST=100
 
 # --- extended: class counts -------------------------------------------------
 # Two training sizes. 5000 rows = 5 rows per class at 1000 classes, the minimum
@@ -288,6 +314,23 @@ benchopt run . \
   -r "${N_REPEAT}" --no-plot \
   --output compute_time_cpu_scaling
 
+echo
+echo "=============================================================="
+echo " 4. Small workloads — rows / features / test, CPU and GPU, fast regime"
+echo "    rows:     n_train=${SMALL_ROWS_TRAIN}, n_features=${SMALL_N_FEATURES}, n_test=${SMALL_N_TEST}"
+echo "    features: n_features=${SMALL_FEATURES}, n_train=${SMALL_N_TRAIN}, n_test=${SMALL_N_TEST}"
+echo "    test:     n_test=${SMALL_TEST_SAMPLES}, n_train=${SMALL_N_TRAIN}, n_features=${SMALL_N_FEATURES}"
+echo "    same datasets on both devices; kv_cache=True, n_estimators=${N_EST}, reps=${N_REPEAT}"
+echo "=============================================================="
+benchopt run . \
+  -d "Simulated[n_train_samples=${SMALL_ROWS_TRAIN},n_features=${SMALL_N_FEATURES},n_test_samples=${SMALL_N_TEST},${DATASET_FIXED}]" \
+  -d "Simulated[n_train_samples=${SMALL_N_TRAIN},n_features=${SMALL_FEATURES},n_test_samples=${SMALL_N_TEST},${DATASET_FIXED}]" \
+  -d "Simulated[n_train_samples=${SMALL_N_TRAIN},n_features=${SMALL_N_FEATURES},n_test_samples=${SMALL_TEST_SAMPLES},${DATASET_FIXED}]" \
+  -s "TabICL-Classifier[n_estimators=${N_EST},kv_cache=True,offload_mode=auto,device=[cpu,cuda],available_memory=None]" \
+  -o "TabICL inference[objective_label='compute time: small workloads, rows/features/test, cpu+cuda, kv cache on']" \
+  -r "${N_REPEAT}" --no-plot \
+  --output compute_time_small_workloads
+
 # ============================================================================
 # EXTENDED (--full)
 # ============================================================================
@@ -295,7 +338,7 @@ benchopt run . \
 if [ "$FULL" = "1" ]; then
   echo
   echo "=============================================================="
-  echo " 4. class count — n_classes ∈ ${CLASS_SWEEP}, n_train ∈ ${CLS_TRAIN_SIZES}"
+  echo " 5. class count — n_classes ∈ ${CLASS_SWEEP}, n_train ∈ ${CLS_TRAIN_SIZES}"
   echo "    n_features=${CLS_N_FEATURES}, n_test=${CLS_N_TEST}"
   echo "    kv_cache=False (the cache supports <= 10 classes), reps=${N_REPEAT}"
   echo "=============================================================="
@@ -308,7 +351,7 @@ if [ "$FULL" = "1" ]; then
 
   echo
   echo "=============================================================="
-  echo " 5. factorial — rows ${FACT_ROWS} × columns ${FACT_FEATURES} × test ${FACT_TEST}"
+  echo " 6. factorial — rows ${FACT_ROWS} × columns ${FACT_FEATURES} × test ${FACT_TEST}"
   echo "    10-class classification, kv_cache=False, reps=${N_REPEAT}"
   echo "=============================================================="
   benchopt run . \
@@ -320,7 +363,7 @@ if [ "$FULL" = "1" ]; then
 
   echo
   echo "=============================================================="
-  echo " 6. many-class scaling — n_classes=100, nine-point slices"
+  echo " 7. many-class scaling — n_classes=100, nine-point slices"
   echo "    rows:       n_train=${MC_ROWS_TRAIN}, n_features=100, n_test=2000"
   echo "    columns:    n_features=${MC_COLS_FEATURES}, n_train=1000, n_test=1000"
   echo "    test:       n_test=${MC_TEST_SAMPLES}, n_train=4000, n_features=100"
@@ -337,7 +380,7 @@ if [ "$FULL" = "1" ]; then
 
   echo
   echo "=============================================================="
-  echo " 7. many-class memory — n_classes=100, small workload"
+  echo " 8. many-class memory — n_classes=100, small workload"
   echo "    n_train=${MEM_N_TRAIN}, n_features=${MEM_N_FEATURES}, n_test=${MEM_N_TEST}"
   echo "    available_memory ∈ ${MEM_BUDGETS} MB, kv_cache=False, reps=${N_REPEAT}"
   echo "=============================================================="
@@ -350,7 +393,7 @@ if [ "$FULL" = "1" ]; then
 
   echo
   echo "=============================================================="
-  echo " 8. many-class memory — n_classes=100, large workload"
+  echo " 9. many-class memory — n_classes=100, large workload"
   echo "    n_train=${MEM_LARGE_N_TRAIN}, n_features=${MEM_N_FEATURES}, n_test=${MEM_N_TEST}"
   echo "    available_memory ∈ ${MEM_BUDGETS_LARGE} MB, kv_cache=False, reps=${N_REPEAT}"
   echo "=============================================================="
@@ -363,7 +406,7 @@ if [ "$FULL" = "1" ]; then
 
   echo
   echo "=============================================================="
-  echo " 9. regression scaling — nine-point slices"
+  echo " 10. regression scaling — nine-point slices"
   echo "    rows:       n_train=${REG_ROWS_TRAIN}, n_features=100, n_test=1000"
   echo "    columns:    n_features=${REG_COLS_FEATURES}, n_train=1000, n_test=1000"
   echo "    test:       n_test=${REG_TEST_SAMPLES}, n_train=4000, n_features=100"
@@ -382,7 +425,7 @@ if [ "$FULL" = "1" ]; then
 
   echo
   echo "=============================================================="
-  echo " 10. regression memory — small workload"
+  echo " 11. regression memory — small workload"
   echo "    n_train=${MEM_N_TRAIN}, n_features=${MEM_N_FEATURES}, n_test=${MEM_N_TEST}"
   echo "    available_memory ∈ ${MEM_BUDGETS} MB, kv_cache=False, reps=${N_REPEAT}"
   echo "=============================================================="
@@ -395,7 +438,7 @@ if [ "$FULL" = "1" ]; then
 
   echo
   echo "=============================================================="
-  echo " 11. regression memory — large workload"
+  echo " 12. regression memory — large workload"
   echo "    n_train=${MEM_LARGE_N_TRAIN}, n_features=${MEM_N_FEATURES}, n_test=${MEM_N_TEST}"
   echo "    available_memory ∈ ${MEM_BUDGETS_LARGE} MB, kv_cache=False, reps=${N_REPEAT}"
   echo "=============================================================="
@@ -408,7 +451,7 @@ if [ "$FULL" = "1" ]; then
 
   echo
   echo "=============================================================="
-  echo " 12. ensemble size — classification, n_estimators ∈ ${N_EST_SWEEP}"
+  echo " 13. ensemble size — classification, n_estimators ∈ ${N_EST_SWEEP}"
   echo "    n_train=${EST_TRAIN_SIZES}, n_features=${EST_N_FEATURES}, n_test=2000"
   echo "    kv_cache=False, reps=${N_REPEAT}"
   echo "=============================================================="
@@ -421,7 +464,7 @@ if [ "$FULL" = "1" ]; then
 
   echo
   echo "=============================================================="
-  echo " 13. ensemble size — regression, n_estimators ∈ ${N_EST_SWEEP}"
+  echo " 14. ensemble size — regression, n_estimators ∈ ${N_EST_SWEEP}"
   echo "    n_train=${EST_TRAIN_SIZES}, n_features=${EST_N_FEATURES}, n_test=1000"
   echo "    kv_cache=False, reps=${N_REPEAT}"
   echo "=============================================================="
